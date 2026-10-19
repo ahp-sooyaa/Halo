@@ -43,6 +43,8 @@ final class WheelModel: ObservableObject {
                 WheelItem(id: "1920", title: "1920px", subtitle: "fit", action: .fit(1920)),
                 WheelItem(id: "compress", title: "Compress", action: .compress),
                 WheelItem(id: "strip", title: "Strip", subtitle: "metadata", action: .strip),
+                WheelItem(id: "trim", title: "Trim", subtitle: "borders", action: .trim),
+                WheelItem(id: "crop", title: "Crop…", action: .cropInteractive),
             ]
         }
     }
@@ -66,6 +68,7 @@ final class WheelModel: ObservableObject {
 final class WheelController {
     let model = WheelModel()
     private var panel: NSPanel?
+    private var cropper: CropController?
     private var generation = 0
 
     var isVisible: Bool { panel?.isVisible == true }
@@ -106,6 +109,20 @@ final class WheelController {
     }
 
     func perform(_ item: WheelItem, on urls: [URL]) {
+        if item.action == .cropInteractive {
+            let images = urls.filter(ImageOps.isImage)
+            hide()
+            guard !images.isEmpty, cropper == nil else { return }
+            // Open after the drag session has fully ended, or Finder keeps focus.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self else { return }
+                let cropper = CropController(urls: images)
+                cropper.onFinish = { [weak self] in self?.cropper = nil }
+                self.cropper = cropper
+                cropper.start()
+            }
+            return
+        }
         model.status = .working
         model.hovered = nil
         let action = item.action

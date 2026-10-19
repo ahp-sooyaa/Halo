@@ -7,8 +7,17 @@ APP=Halo.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
-swiftc -O -swift-version 5 -target arm64-apple-macos13 \
-  Sources/*.swift -o "$APP/Contents/MacOS/Halo"
+# libwebp (brew install webp) is linked statically so the app runs without Homebrew.
+WEBP="${WEBP_PREFIX:-$(brew --prefix webp 2>/dev/null || echo /opt/homebrew/opt/webp)}"
+if [[ ! -f "$WEBP/lib/libwebp.a" ]]; then
+  echo "libwebp not found. Install it with: brew install webp" >&2
+  exit 1
+fi
+
+swiftc -O -swift-version 5 -target arm64-apple-macos26 \
+  -import-objc-header Sources/WebP-Bridging.h -Xcc -I"$WEBP/include" \
+  Sources/*.swift "$WEBP/lib/libwebp.a" "$WEBP/lib/libsharpyuv.a" \
+  -o "$APP/Contents/MacOS/Halo"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -22,7 +31,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

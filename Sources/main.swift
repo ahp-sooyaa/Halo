@@ -74,6 +74,11 @@ if let i = args.firstIndex(of: "--run"), args.count > i + 2 {
     case "pdf": action = .pdf
     case "compress": action = .compress
     case "strip": action = .strip
+    case "trim": action = .trim
+    case let s where s.hasPrefix("crop:"):
+        // crop:x,y,w,h as fractions of the image, origin top-left
+        let v = s.dropFirst(5).split(separator: ",").compactMap { Double($0) }
+        action = v.count == 4 ? .crop(CGRect(x: v[0], y: v[1], width: v[2], height: v[3])) : nil
     case "fit": action = .fit(1920)
     case let s where s.hasPrefix("scale"): action = Double(s.dropFirst(5)).map { .scale($0 / 100) }
     default: action = ImageOps.formats.first { $0.name.lowercased() == name }.map { .convert($0.type) }

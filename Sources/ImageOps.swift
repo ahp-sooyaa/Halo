@@ -10,18 +10,27 @@ enum ImageAction: Equatable {
     case fit(Int)
     case compress
     case strip
+    case trim
+    case crop(CGRect)    // normalised, origin top-left
+    case cropInteractive // opens the crop window; handled by WheelController
 }
 
 enum ImageOpsError: LocalizedError {
     case unreadable(String)
     case writeFailed(String)
     case noImages
+    case nothingToTrim
+    case webPTooLarge
+    case unsupported
 
     var errorDescription: String? {
         switch self {
         case .unreadable(let name): return "Can't read \(name)"
         case .writeFailed(let name): return "Can't write \(name)"
         case .noImages: return "No images"
+        case .nothingToTrim: return "No border to trim"
+        case .webPTooLarge: return "WebP max is \(WebP.maxDimension)px"
+        case .unsupported: return "Not supported"
         }
     }
 }
@@ -31,6 +40,9 @@ enum ImageOps {
 
     static func canWrite(_ type: UTType) -> Bool { writableTypes.contains(type.identifier) }
 
+    /// ImageIO encoders plus WebP through libwebp.
+    static func canEncode(_ type: UTType) -> Bool { type == .webP || canWrite(type) }
+
     /// Output formats offered on the Convert wheel, limited to what this Mac's ImageIO can encode.
     static let formats: [(name: String, type: UTType)] = {
         let all: [(String, UTType?)] = [
@@ -38,7 +50,7 @@ enum ImageOps {
             ("AVIF", UTType("public.avif")), ("TIFF", .tiff), ("GIF", .gif), ("BMP", .bmp),
         ]
         return all.compactMap { name, type in
-            guard let type, canWrite(type) else { return nil }
+            guard let type, canEncode(type) else { return nil }
             return (name, type)
         }
     }()
@@ -63,7 +75,7 @@ enum ImageOps {
 
     static func run(_ action: ImageAction, on url: URL) throws -> URL {
         let sourceType = type(of: url) ?? .png
-        let sameType = canWrite(sourceType) ? sourceType : .png
+        let sameType = canEncode(sourceType) ? sourceType : .png
 
         switch action {
         case .convert(let target):
@@ -81,7 +93,7 @@ enum ImageOps {
             return try save(scaled(image, by: factor), props: props, from: url, as: sameType, suffix: "\(maxSide)px")
 
         case .compress:
-            let lossy: [UTType] = [.jpeg, .heic, .webP, UTType("public.avif")].compactMap { $0 }.filter(canWrite)
+            let lossy: [UTType] = [.jpeg, .heic, .webP, UTType("public.avif")].compactMap { $0 }.filter(canEncode)
             let target = lossy.contains(sourceType) ? sourceType : .jpeg
             let (image, props) = try load(url, oriented: false)
             return try save(image, props: props, from: url, as: target,
@@ -91,8 +103,27 @@ enum ImageOps {
             let (image, _) = try load(url, oriented: true)
             return try save(image, props: [:], from: url, as: sameType, suffix: "clean")
 
+        case .trim:
+            let (image, props) = try load(url, oriented: true)
+            guard let box = trimRect(image),
+                  box.size != CGSize(width: image.width, height: image.height),
+                  let trimmed = image.cropping(to: box) else { throw ImageOpsError.nothingToTrim }
+            return try save(trimmed, props: props, from: url, as: sameType, suffix: "trimmed")
+
+        case .crop(let normalized):
+            let (image, props) = try load(url, oriented: true)
+            let W = CGFloat(image.width), H = CGFloat(image.height)
+            let box = CGRect(x: normalized.minX * W, y: normalized.minY * H,
+                             width: normalized.width * W, height: normalized.height * H)
+                .integral.intersection(CGRect(x: 0, y: 0, width: W, height: H))
+            guard !box.isEmpty, let cropped = image.cropping(to: box) else { throw ImageOpsError.unsupported }
+            return try save(cropped, props: props, from: url, as: sameType, suffix: "cropped")
+
         case .pdf:
             return try makePDF([url])
+
+        case .cropInteractive:
+            throw ImageOpsError.unsupported
         }
     }
 
@@ -100,7 +131,7 @@ enum ImageOps {
 
     /// Loads the first frame. `oriented` bakes the EXIF rotation into the pixels (needed before
     /// resizing or dropping metadata) and resets the orientation tag to match.
-    private static func load(_ url: URL, oriented: Bool) throws -> (CGImage, [CFString: Any]) {
+    static func load(_ url: URL, oriented: Bool) throws -> (CGImage, [CFString: Any]) {
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 {
             var props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
             if oriented {
@@ -179,6 +210,15 @@ enum ImageOps {
         let ext = type == .jpeg ? "jpg" : (type.preferredFilenameExtension ?? "img")
         let out = uniqueURL(in: source.deletingLastPathComponent(), name: name, ext: ext)
 
+        if type == .webP && !canWrite(.webP) {
+            guard max(image.width, image.height) <= WebP.maxDimension else { throw ImageOpsError.webPTooLarge }
+            guard let data = WebP.encode(image, quality: quality ?? 0.85) else {
+                throw ImageOpsError.writeFailed(out.lastPathComponent)
+            }
+            do { try data.write(to: out) } catch { throw ImageOpsError.writeFailed(out.lastPathComponent) }
+            return out
+        }
+
         let pixels = (type == .jpeg || type == .bmp) ? flattened(image) : image
         var options = props
         if let quality { options[kCGImageDestinationLossyCompressionQuality] = quality }
@@ -192,6 +232,35 @@ enum ImageOps {
             throw ImageOpsError.writeFailed(out.lastPathComponent)
         }
         return out
+    }
+
+    /// Bounding box (top-left origin, pixels) of everything that differs from the top-left
+    /// pixel's colour, i.e. the image without its uniform or transparent border.
+    static func trimRect(_ image: CGImage) -> CGRect? {
+        let w = image.width, h = image.height
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = ctx.data else { return nil }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let px = data.assumingMemoryBound(to: UInt8.self)
+        let stride = ctx.bytesPerRow
+        let ref = (px[0], px[1], px[2], px[3])
+        let tolerance = 12
+
+        func differs(_ x: Int, _ y: Int) -> Bool {
+            let i = y * stride + x * 4
+            return abs(Int(px[i]) - Int(ref.0)) > tolerance || abs(Int(px[i + 1]) - Int(ref.1)) > tolerance
+                || abs(Int(px[i + 2]) - Int(ref.2)) > tolerance || abs(Int(px[i + 3]) - Int(ref.3)) > tolerance
+        }
+        func rowDiffers(_ y: Int) -> Bool { (0..<w).contains { differs($0, y) } }
+
+        guard let top = (0..<h).first(where: rowDiffers),
+              let bottom = (0..<h).reversed().first(where: rowDiffers) else { return nil }
+        func columnDiffers(_ x: Int) -> Bool { (top...bottom).contains { differs(x, $0) } }
+        let left = (0..<w).first(where: columnDiffers) ?? 0
+        let right = (0..<w).reversed().first(where: columnDiffers) ?? w - 1
+        return CGRect(x: left, y: top, width: right - left + 1, height: bottom - top + 1)
     }
 
     private static func makePDF(_ urls: [URL]) throws -> URL {
