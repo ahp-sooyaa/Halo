@@ -17,7 +17,7 @@ enum WheelGeometry {
 
 @MainActor
 final class WheelModel: ObservableObject {
-    enum Status: Equatable { case idle, working, done(Int), failed(String) }
+    enum Status: Equatable { case idle, working(done: Int, total: Int), done(saved: Int, failed: Int), failed(String) }
 
     @Published var mode: WheelMode = .convert
     @Published var items: [WheelItem] = []
@@ -113,7 +113,7 @@ final class WheelController {
         }
     }
 
-    func hide(after delay: TimeInterval = 0) {
+    func hide(after delay: TimeInterval = 0, then completion: (() -> Void)? = nil) {
         let gen = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             guard gen == self.generation else { return }
@@ -121,6 +121,7 @@ final class WheelController {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
                 guard gen == self.generation else { return }
                 self.panel?.orderOut(nil)
+                completion?()
             }
         }
     }
@@ -145,23 +146,45 @@ final class WheelController {
             }
             return
         }
-        model.status = .working
+        let images = urls.filter(ImageOps.isImage)
+        guard !images.isEmpty else {
+            model.status = .failed(ImageOpsError.noImages.localizedDescription)
+            NSSound.beep()
+            hide(after: 1.5)
+            return
+        }
+
+        let center = JobCenter.shared
+        let wasBusy = !center.activeJobs.isEmpty
+        let job = center.submit(item, on: images)
         model.hovered = nil
-        let action = item.action
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try ImageOps.run(action, on: urls) }
-            DispatchQueue.main.async {
-                switch result {
-                case .success(let outputs):
-                    self.model.status = .done(outputs.count)
-                    NSSound(named: "Pop")?.play()
-                    self.hide(after: 0.8)
-                case .failure(let error):
-                    self.model.status = .failed(error.localizedDescription)
-                    NSSound.beep()
-                    self.hide(after: 2)
-                }
+        model.status = .working(done: 0, total: job.total)
+
+        job.onChange = { [weak self, weak job] in
+            guard let self, let job else { return }
+            if job.isActive {
+                self.model.status = .working(done: job.completed, total: job.total)
+                return
             }
+            job.onChange = nil
+            if job.outputs.isEmpty, let failure = job.failures.first {
+                self.model.status = .failed(failure.reason)
+                NSSound.beep()
+                self.hide(after: 2)
+            } else {
+                self.model.status = .done(saved: job.outputs.count, failed: job.failures.count)
+                NSSound(named: "Pop")?.play()
+                self.hide(after: job.failures.isEmpty ? 0.8 : 1.6)
+            }
+        }
+
+        // Still going after a moment (or stuck behind another job): hand it to the menu bar.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (wasBusy ? 0.5 : 1.5)) { [weak self, weak job] in
+            guard let self, let job, job.isActive, job.onChange != nil else { return }
+            job.onChange = nil
+            job.handedOff = true
+            Notifier.requestPermission()
+            self.hide { self.model.status = .idle }
         }
     }
 
@@ -345,13 +368,27 @@ struct WheelView: View {
                 }
             }
             .foregroundStyle(.white)
+        case .working(let done, let total) where total > 1:
+            ZStack {
+                Circle().stroke(Color.white.opacity(0.15), lineWidth: 4)
+                Circle()
+                    .trim(from: 0, to: CGFloat(done) / CGFloat(total))
+                    .stroke(accent, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Text("\(done)/\(total)")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 66, height: 66)
+            .animation(.easeOut(duration: 0.2), value: done)
         case .working:
             ProgressView().controlSize(.small)
-        case .done(let count):
+        case .done(let saved, let failed):
             VStack(spacing: 2) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 26)).foregroundStyle(.green)
-                Text(count == 1 ? "Saved" : "Saved \(count)")
+                Image(systemName: failed == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    .font(.system(size: 26)).foregroundStyle(failed == 0 ? .green : .orange)
+                Text(failed > 0 ? "\(saved) saved · \(failed) failed" : saved == 1 ? "Saved" : "Saved \(saved)")
                     .font(.system(size: 11, weight: .semibold, design: .rounded)).foregroundStyle(.white)
             }
             .transition(.scale.combined(with: .opacity))

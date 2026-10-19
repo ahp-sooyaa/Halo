@@ -208,15 +208,25 @@ enum ImageOps {
         let base = source.deletingPathExtension().lastPathComponent
         let name = suffix.map { "\(base) \($0)" } ?? base
         let ext = type == .jpeg ? "jpg" : (type.preferredFilenameExtension ?? "img")
-        let out = uniqueURL(in: source.deletingLastPathComponent(), name: name, ext: ext)
+        let out = try reserveURL(in: source.deletingLastPathComponent(), name: name, ext: ext)
+        do {
+            try write(image, props: props, as: type, quality: quality, to: out)
+        } catch {
+            try? FileManager.default.removeItem(at: out)
+            throw error
+        }
+        return out
+    }
 
+    private static func write(_ image: CGImage, props: [CFString: Any], as type: UTType,
+                              quality: Double?, to out: URL) throws {
         if type == .webP && !canWrite(.webP) {
             guard max(image.width, image.height) <= WebP.maxDimension else { throw ImageOpsError.webPTooLarge }
             guard let data = WebP.encode(image, quality: quality ?? 0.85) else {
                 throw ImageOpsError.writeFailed(out.lastPathComponent)
             }
             do { try data.write(to: out) } catch { throw ImageOpsError.writeFailed(out.lastPathComponent) }
-            return out
+            return
         }
 
         let pixels = (type == .jpeg || type == .bmp) ? flattened(image) : image
@@ -227,11 +237,7 @@ enum ImageOps {
             throw ImageOpsError.writeFailed(out.lastPathComponent)
         }
         CGImageDestinationAddImage(dest, pixels, options as CFDictionary)
-        guard CGImageDestinationFinalize(dest) else {
-            try? FileManager.default.removeItem(at: out)
-            throw ImageOpsError.writeFailed(out.lastPathComponent)
-        }
-        return out
+        guard CGImageDestinationFinalize(dest) else { throw ImageOpsError.writeFailed(out.lastPathComponent) }
     }
 
     /// Bounding box (top-left origin, pixels) of everything that differs from the top-left
@@ -272,20 +278,27 @@ enum ImageOps {
             doc.insert(page, at: doc.pageCount)
         }
         let first = urls[0]
-        let out = uniqueURL(in: first.deletingLastPathComponent(),
-                            name: first.deletingPathExtension().lastPathComponent, ext: "pdf")
-        guard doc.write(to: out) else { throw ImageOpsError.writeFailed(out.lastPathComponent) }
+        let out = try reserveURL(in: first.deletingLastPathComponent(),
+                                 name: first.deletingPathExtension().lastPathComponent, ext: "pdf")
+        guard doc.write(to: out) else {
+            try? FileManager.default.removeItem(at: out)
+            throw ImageOpsError.writeFailed(out.lastPathComponent)
+        }
         return out
     }
 
-    /// "photo.png", then "photo 2.png", "photo 3.png"… never overwrites anything.
-    static func uniqueURL(in dir: URL, name: String, ext: String) -> URL {
-        var candidate = dir.appendingPathComponent(name).appendingPathExtension(ext)
-        var n = 2
-        while FileManager.default.fileExists(atPath: candidate.path) {
-            candidate = dir.appendingPathComponent("\(name) \(n)").appendingPathExtension(ext)
-            n += 1
+    /// Claims "photo.png", then "photo 2.png", "photo 3.png"… by creating an empty file with
+    /// O_EXCL, so files converted in parallel can't pick the same name. Never overwrites anything.
+    static func reserveURL(in dir: URL, name: String, ext: String) throws -> URL {
+        for n in 1...10_000 {
+            let candidate = dir.appendingPathComponent(n == 1 ? name : "\(name) \(n)").appendingPathExtension(ext)
+            let fd = open(candidate.path, O_CREAT | O_EXCL | O_WRONLY, 0o644)
+            if fd >= 0 {
+                close(fd)
+                return candidate
+            }
+            if errno != EEXIST { break }
         }
-        return candidate
+        throw ImageOpsError.writeFailed("\(name).\(ext)")
     }
 }

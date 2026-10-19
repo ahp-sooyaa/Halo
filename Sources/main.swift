@@ -1,8 +1,10 @@
 import AppKit
 import ServiceManagement
+import SwiftUI
+import UserNotifications
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
     private let wheel = WheelController()
     private let watcher = DragWatcher()
@@ -11,22 +13,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "camera.aperture", accessibilityDescription: "Halo")
+        statusItem.button?.image = MenuBarIcon.idle
 
         let menu = NSMenu()
-        let help = NSMenuItem(title: "Drag an image, tap ⇧ to convert, ⌘ for tools", action: nil, keyEquivalent: "")
-        help.isEnabled = false
-        menu.addItem(help)
-        menu.addItem(.separator())
-        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-        loginItem.target = self
-        menu.addItem(loginItem)
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit Halo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.delegate = self // rebuilt each time it opens, see menuNeedsUpdate
         statusItem.menu = menu
-        refreshLoginItem()
+        loginItem.target = self
+
+        Notifier.setUp(delegate: self)
+        JobCenter.shared.onChange = { [weak self] in self?.refreshIcon() }
 
         watcher.onKeyTap = { [weak self] mode, urls in
             guard let self else { return }
@@ -47,6 +42,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             wheel.hide(after: 6)
         }
     }
+
+    // MARK: Menu
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let help = NSMenuItem(title: "Drag an image, tap ⇧ to convert, ⌘ for tools", action: nil, keyEquivalent: "")
+        help.isEnabled = false
+        menu.addItem(help)
+
+        let jobs = JobCenter.shared.jobs
+        if !jobs.isEmpty {
+            menu.addItem(.separator())
+            // Newest first.
+            for job in jobs.reversed() {
+                let host = NSHostingView(rootView: JobRow(job: job))
+                host.frame = CGRect(origin: .zero, size: CGSize(width: JobRow.width, height: host.fittingSize.height))
+                let item = NSMenuItem()
+                item.view = host
+                menu.addItem(item)
+            }
+            if jobs.contains(where: { !$0.isActive }) {
+                let clear = NSMenuItem(title: "Clear Finished", action: #selector(clearFinished), keyEquivalent: "")
+                clear.target = self
+                menu.addItem(clear)
+            }
+        }
+
+        menu.addItem(.separator())
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+        refreshLoginItem()
+        menu.addItem(loginItem)
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit Halo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    private func refreshIcon() {
+        statusItem.button?.image = JobCenter.shared.overallFraction.map(MenuBarIcon.progress) ?? MenuBarIcon.idle
+    }
+
+    @objc private func clearFinished() {
+        JobCenter.shared.clearFinished()
+    }
+
+    // MARK: Notifications
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                            withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                            withCompletionHandler completionHandler: @escaping () -> Void) {
+        let id = response.notification.request.content.userInfo["job"] as? String
+        let tapped = response.actionIdentifier == UNNotificationDefaultActionIdentifier
+            || response.actionIdentifier == Notifier.revealAction
+        DispatchQueue.main.async {
+            if tapped, let id { JobCenter.shared.job(withID: id)?.revealOutputs() }
+            completionHandler()
+        }
+    }
+
+    // MARK: Actions
 
     @objc private func openSettings() {
         settingsWindow.show()

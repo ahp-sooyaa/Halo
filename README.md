@@ -6,6 +6,10 @@ A tiny macOS menu bar app for converting images while you drag them.
 2. Tap **⇧** for the **Convert** wheel (PNG, JPG, HEIC, WebP, AVIF, TIFF, GIF, BMP, PDF) or **⌘** for the **Tools** wheel (resize 75/50/25%, fit 1920px, compress, strip metadata, trim borders, crop…). **Crop…** opens a small window: drag to draw or move the selection, pick an aspect ratio, press Return to save.
 3. Drop on a slice. The result is saved next to the original; nothing is overwritten. Drop in the centre to cancel.
 
+Quick jobs finish in the wheel. If a job takes longer than about 1.5 seconds, the wheel hands it to the menu bar: the icon turns into a progress ring, the menu lists each job with Cancel / Show, and a notification appears when it's done. Files in a job are processed a few at a time in parallel; a file that fails is reported without stopping the rest.
+
+Menu bar → **Settings…** turns individual formats and tools on or off.
+
 No Accessibility or Input Monitoring permission is needed: mouse buttons, modifier keys and the drag pasteboard are polled.
 
 ## Build
@@ -38,6 +42,9 @@ Actions: any format name, `pdf`, `scaleNN`, `fit`, `compress`, `strip`, `trim`, 
 - `Sources/ImageOps.swift` — ImageIO/PDFKit conversions, trim and crop
 - `Sources/WebP.swift`, `Sources/WebP-Bridging.h` — WebP encoding via libwebp
 - `Sources/CropWindow.swift` — interactive crop window
+- `Sources/Jobs.swift` — job queue, parallel processing, cancel, notifications
+- `Sources/MenuBar.swift` — menu bar progress icon and job rows
+- `Sources/Settings.swift` — Settings window and stored on/off choices
 
 ## Known limitations
 
