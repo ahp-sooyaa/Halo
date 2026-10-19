@@ -1,17 +1,21 @@
 import AppKit
 import UserNotifications
 
-/// One drop on the wheel: an action applied to a set of images.
+/// A batch of image work: one drop on the wheel, or one Save in the crop window.
 @MainActor
 final class Job: ObservableObject, Identifiable {
     enum State { case queued, running, finished, cancelled }
 
     let id = UUID()
     let title: String
-    let action: ImageAction
-    let inputs: [URL]
-    /// Units of work: one per file, or a single one for "combine into PDF".
-    let units: [[URL]]
+    /// One action on one file, or on several for "combine into PDF".
+    struct Unit {
+        let action: ImageAction
+        let urls: [URL]
+    }
+
+    let units: [Unit]
+    var inputs: [URL] { units.flatMap(\.urls) }
 
     @Published fileprivate(set) var state: State = .queued
     @Published fileprivate(set) var completed = 0
@@ -30,11 +34,15 @@ final class Job: ObservableObject, Identifiable {
     var isActive: Bool { state == .queued || state == .running }
     var fraction: Double { total == 0 ? 1 : Double(completed) / Double(total) }
 
-    init(title: String, action: ImageAction, inputs: [URL]) {
+    init(title: String, units: [Unit]) {
         self.title = title
-        self.action = action
-        self.inputs = inputs
-        units = action == .pdf ? [inputs] : inputs.map { [$0] }
+        self.units = units
+    }
+
+    /// The same action on every file.
+    convenience init(title: String, action: ImageAction, inputs: [URL]) {
+        self.init(title: title, units: action == .pdf ? [Unit(action: .pdf, urls: inputs)]
+                                                      : inputs.map { Unit(action: action, urls: [$0]) })
     }
 
     func cancel() {
@@ -92,7 +100,11 @@ final class JobCenter: ObservableObject {
 
     @discardableResult
     func submit(_ item: WheelItem, on urls: [URL]) -> Job {
-        let job = Job(title: Job.title(for: item), action: item.action, inputs: urls)
+        submit(Job(title: Job.title(for: item), action: item.action, inputs: urls))
+    }
+
+    @discardableResult
+    func submit(_ job: Job) -> Job {
         jobs.append(job)
         startNextIfIdle()
         changed(job)
@@ -114,10 +126,9 @@ final class JobCenter: ObservableObject {
         // A few at a time: full-size photos decode to hundreds of MB each.
         job.operations.maxConcurrentOperationCount = max(2, min(4, ProcessInfo.processInfo.activeProcessorCount / 2))
         job.operations.qualityOfService = .userInitiated
-        let action = job.action
         for unit in job.units {
             job.operations.addOperation {
-                let result = Result { try ImageOps.run(action, on: unit) }
+                let result = Result { try ImageOps.run(unit.action, on: unit.urls) }
                 DispatchQueue.main.async { self.record(result, for: unit, in: job) }
             }
         }
@@ -127,12 +138,12 @@ final class JobCenter: ObservableObject {
         }
     }
 
-    private func record(_ result: Result<[URL], Error>, for unit: [URL], in job: Job) {
+    private func record(_ result: Result<[URL], Error>, for unit: Job.Unit, in job: Job) {
         job.completed += 1
         switch result {
         case .success(let urls): job.outputs += urls
         case .failure(let error):
-            job.failures.append((unit.count == 1 ? unit[0].lastPathComponent : "PDF", error.localizedDescription))
+            job.failures.append((unit.urls.count == 1 ? unit.urls[0].lastPathComponent : "PDF", error.localizedDescription))
         }
         changed(job)
     }
