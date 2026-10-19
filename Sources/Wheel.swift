@@ -26,15 +26,32 @@ final class WheelModel: ObservableObject {
     @Published var shown = false
     @Published var fileCount = 0
 
+    /// What the wheel shows for these files: the catalog minus items turned off in Settings,
+    /// and minus the files' own format on the Convert wheel.
     static func items(for mode: WheelMode, urls: [URL]) -> [WheelItem] {
+        let settings = Settings.shared
+        var list = catalog(for: mode).filter { settings.isEnabled($0, in: mode) }
+        if mode == .convert {
+            let sourceTypes = Set(urls.compactMap { ImageOps.type(of: $0)?.identifier })
+            list.removeAll {
+                if case .convert(let type) = $0.action {
+                    return sourceTypes.count == 1 && sourceTypes.contains(type.identifier)
+                }
+                return false
+            }
+            if urls.count > 1, let i = list.firstIndex(where: { $0.action == .pdf }) {
+                list[i].subtitle = "combine"
+            }
+        }
+        return list
+    }
+
+    /// Every item a wheel can offer, in wheel order.
+    static func catalog(for mode: WheelMode) -> [WheelItem] {
         switch mode {
         case .convert:
-            let sourceTypes = Set(urls.compactMap { ImageOps.type(of: $0)?.identifier })
-            var list = ImageOps.formats
-                .filter { !(sourceTypes.count == 1 && sourceTypes.contains($0.type.identifier)) }
-                .map { WheelItem(id: $0.name, title: $0.name, action: .convert($0.type)) }
-            list.append(WheelItem(id: "PDF", title: "PDF", subtitle: urls.count > 1 ? "combine" : nil, action: .pdf))
-            return list
+            return ImageOps.formats.map { WheelItem(id: $0.name, title: $0.name, action: .convert($0.type)) }
+                + [WheelItem(id: "PDF", title: "PDF", action: .pdf)]
         case .tools:
             return [
                 WheelItem(id: "75", title: "75%", subtitle: "resize", action: .scale(0.75)),
@@ -74,9 +91,14 @@ final class WheelController {
     var isVisible: Bool { panel?.isVisible == true }
 
     func show(_ mode: WheelMode, urls: [URL]) {
+        let items = WheelModel.items(for: mode, urls: urls)
+        guard !items.isEmpty else {
+            hide() // everything in this wheel is turned off in Settings
+            return
+        }
         generation += 1
         model.mode = mode
-        model.items = WheelModel.items(for: mode, urls: urls)
+        model.items = items
         model.fileCount = urls.count
         model.hovered = nil
         model.status = .idle

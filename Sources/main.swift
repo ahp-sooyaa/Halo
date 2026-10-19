@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let wheel = WheelController()
     private let watcher = DragWatcher()
+    private let settingsWindow = SettingsWindowController()
     private let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -17,8 +18,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         help.isEnabled = false
         menu.addItem(help)
         menu.addItem(.separator())
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         loginItem.target = self
         menu.addItem(loginItem)
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Halo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
         refreshLoginItem()
@@ -41,6 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             wheel.model.hovered = 1
             wheel.hide(after: 6)
         }
+    }
+
+    @objc private func openSettings() {
+        settingsWindow.show()
     }
 
     private func refreshLoginItem() {
