@@ -1,0 +1,336 @@
+import AppKit
+import SwiftUI
+
+struct WheelItem: Identifiable, Equatable {
+    let id: String
+    let title: String
+    var subtitle: String? = nil
+    let action: ImageAction
+}
+
+enum WheelGeometry {
+    static let size: CGFloat = 320
+    static let outer: CGFloat = 150
+    static let inner: CGFloat = 58
+    static let gap: CGFloat = 3
+}
+
+@MainActor
+final class WheelModel: ObservableObject {
+    enum Status: Equatable { case idle, working, done(Int), failed(String) }
+
+    @Published var mode: WheelMode = .convert
+    @Published var items: [WheelItem] = []
+    @Published var hovered: Int?
+    @Published var status: Status = .idle
+    @Published var shown = false
+    @Published var fileCount = 0
+
+    static func items(for mode: WheelMode, urls: [URL]) -> [WheelItem] {
+        switch mode {
+        case .convert:
+            let sourceTypes = Set(urls.compactMap { ImageOps.type(of: $0)?.identifier })
+            var list = ImageOps.formats
+                .filter { !(sourceTypes.count == 1 && sourceTypes.contains($0.type.identifier)) }
+                .map { WheelItem(id: $0.name, title: $0.name, action: .convert($0.type)) }
+            list.append(WheelItem(id: "PDF", title: "PDF", subtitle: urls.count > 1 ? "combine" : nil, action: .pdf))
+            return list
+        case .tools:
+            return [
+                WheelItem(id: "75", title: "75%", subtitle: "resize", action: .scale(0.75)),
+                WheelItem(id: "50", title: "50%", subtitle: "resize", action: .scale(0.5)),
+                WheelItem(id: "25", title: "25%", subtitle: "resize", action: .scale(0.25)),
+                WheelItem(id: "1920", title: "1920px", subtitle: "fit", action: .fit(1920)),
+                WheelItem(id: "compress", title: "Compress", action: .compress),
+                WheelItem(id: "strip", title: "Strip", subtitle: "metadata", action: .strip),
+            ]
+        }
+    }
+
+    /// Slice under a point in the wheel view's own (y-up) coordinates; nil in the centre = cancel.
+    func index(at p: CGPoint, in bounds: CGRect) -> Int? {
+        guard !items.isEmpty else { return nil }
+        let dx = p.x - bounds.midX, dy = p.y - bounds.midY
+        let r = hypot(dx, dy)
+        guard r > WheelGeometry.inner, r < WheelGeometry.size / 2 else { return nil }
+        var angle = atan2(dx, dy) // clockwise from 12 o'clock
+        if angle < 0 { angle += 2 * .pi }
+        let width = 2 * .pi / Double(items.count)
+        return Int((angle + width / 2) / width) % items.count
+    }
+}
+
+// MARK: - Controller
+
+@MainActor
+final class WheelController {
+    let model = WheelModel()
+    private var panel: NSPanel?
+    private var generation = 0
+
+    var isVisible: Bool { panel?.isVisible == true }
+
+    func show(_ mode: WheelMode, urls: [URL]) {
+        generation += 1
+        model.mode = mode
+        model.items = WheelModel.items(for: mode, urls: urls)
+        model.fileCount = urls.count
+        model.hovered = nil
+        model.status = .idle
+
+        let panel = self.panel ?? makePanel()
+        self.panel = panel
+        if !panel.isVisible {
+            panel.setFrame(frameAroundCursor(), display: false)
+            model.shown = false
+            panel.orderFrontRegardless()
+            DispatchQueue.main.async { self.model.shown = true }
+        }
+    }
+
+    func hide(after delay: TimeInterval = 0) {
+        let gen = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard gen == self.generation else { return }
+            self.model.shown = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                guard gen == self.generation else { return }
+                self.panel?.orderOut(nil)
+            }
+        }
+    }
+
+    /// Mouse released without dropping on a slice.
+    func dragEnded() {
+        if model.status == .idle { hide() }
+    }
+
+    func perform(_ item: WheelItem, on urls: [URL]) {
+        model.status = .working
+        model.hovered = nil
+        let action = item.action
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try ImageOps.run(action, on: urls) }
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let outputs):
+                    self.model.status = .done(outputs.count)
+                    NSSound(named: "Pop")?.play()
+                    self.hide(after: 0.8)
+                case .failure(let error):
+                    self.model.status = .failed(error.localizedDescription)
+                    NSSound.beep()
+                    self.hide(after: 2)
+                }
+            }
+        }
+    }
+
+    private func frameAroundCursor() -> CGRect {
+        let mouse = NSEvent.mouseLocation
+        let s = WheelGeometry.size
+        var frame = CGRect(x: mouse.x - s / 2, y: mouse.y - s / 2, width: s, height: s)
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) {
+            let v = screen.visibleFrame
+            frame.origin.x = min(max(frame.minX, v.minX), v.maxX - s)
+            frame.origin.y = min(max(frame.minY, v.minY), v.maxY - s)
+        }
+        return frame
+    }
+
+    private func makePanel() -> NSPanel {
+        let rect = CGRect(x: 0, y: 0, width: WheelGeometry.size, height: WheelGeometry.size)
+        let panel = NSPanel(contentRect: rect, styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.level = .popUpMenu
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+
+        let container = NSView(frame: rect)
+        let host = NSHostingView(rootView: WheelView(model: model))
+        host.frame = rect
+        host.autoresizingMask = [.width, .height]
+        container.addSubview(host)
+
+        // Transparent overlay on top so it, not SwiftUI, receives the drag.
+        let drop = DropView(frame: rect)
+        drop.controller = self
+        drop.autoresizingMask = [.width, .height]
+        container.addSubview(drop)
+
+        panel.contentView = container
+        return panel
+    }
+}
+
+// MARK: - Drop target
+
+final class DropView: NSView {
+    weak var controller: WheelController?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func slice(for info: NSDraggingInfo) -> Int? {
+        controller?.model.index(at: convert(info.draggingLocation, from: nil), in: bounds)
+    }
+
+    private func update(_ info: NSDraggingInfo) -> NSDragOperation {
+        guard let model = controller?.model, model.status == .idle else { return [] }
+        let index = slice(for: info)
+        if model.hovered != index {
+            model.hovered = index
+            if index != nil {
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            }
+        }
+        return index == nil ? [] : .copy
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { update(sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { update(sender) }
+    override func draggingExited(_ sender: NSDraggingInfo?) { controller?.model.hovered = nil }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let controller, controller.model.status == .idle,
+              let index = slice(for: sender), controller.model.items.indices.contains(index) else { return false }
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                                         options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        guard !urls.isEmpty else { return false }
+        controller.perform(controller.model.items[index], on: urls)
+        return true
+    }
+}
+
+// MARK: - SwiftUI
+
+private let accent = LinearGradient(colors: [Color(red: 1.0, green: 0.62, blue: 0.18),
+                                             Color(red: 0.98, green: 0.42, blue: 0.10)],
+                                    startPoint: .top, endPoint: .bottom)
+
+struct SliceShape: Shape {
+    let start: Double
+    let end: Double
+
+    func path(in rect: CGRect) -> Path {
+        let c = CGPoint(x: rect.midX, y: rect.midY)
+        let g = WheelGeometry.gap
+        func point(_ t: Double, _ r: CGFloat) -> CGPoint {
+            // Constant-width gaps: trim the angle by gap/r at each radius.
+            let a = (start + Double(g / r)) + (end - start - 2 * Double(g / r)) * t
+            return CGPoint(x: c.x + r * sin(a), y: c.y - r * cos(a))
+        }
+        let steps = 32
+        var p = Path()
+        p.move(to: point(0, WheelGeometry.outer))
+        for s in 1...steps { p.addLine(to: point(Double(s) / Double(steps), WheelGeometry.outer)) }
+        for s in (0...steps).reversed() { p.addLine(to: point(Double(s) / Double(steps), WheelGeometry.inner)) }
+        p.closeSubpath()
+        return p
+    }
+}
+
+struct WheelView: View {
+    @ObservedObject var model: WheelModel
+
+    var body: some View {
+        let n = max(model.items.count, 1)
+        let width = 2 * Double.pi / Double(n)
+
+        ZStack {
+            Circle()
+                .fill(.ultraThinMaterial)
+                .overlay(Circle().fill(Color.black.opacity(0.45)))
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+                .frame(width: WheelGeometry.outer * 2 + 8, height: WheelGeometry.outer * 2 + 8)
+                .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
+
+            ForEach(Array(model.items.enumerated()), id: \.element.id) { i, item in
+                let mid = Double(i) * width
+                let selected = model.hovered == i
+                SliceShape(start: mid - width / 2, end: mid + width / 2)
+                    .fill(selected ? AnyShapeStyle(accent) : AnyShapeStyle(Color.white.opacity(0.07)))
+                label(item, selected: selected)
+                    .offset(x: CGFloat(sin(mid)) * (WheelGeometry.inner + WheelGeometry.outer) / 2,
+                            y: CGFloat(-cos(mid)) * (WheelGeometry.inner + WheelGeometry.outer) / 2)
+            }
+            .opacity(model.status == .idle ? 1 : 0.35)
+
+            Circle()
+                .fill(Color.white.opacity(0.06))
+                .frame(width: (WheelGeometry.inner - 6) * 2, height: (WheelGeometry.inner - 6) * 2)
+            center
+        }
+        .frame(width: WheelGeometry.size, height: WheelGeometry.size)
+        .environment(\.colorScheme, .dark)
+        .scaleEffect(model.shown ? 1 : 0.6)
+        .opacity(model.shown ? 1 : 0)
+        .animation(.spring(response: 0.26, dampingFraction: 0.72), value: model.shown)
+        .animation(.easeOut(duration: 0.12), value: model.hovered)
+        .animation(.easeOut(duration: 0.15), value: model.status)
+    }
+
+    private func label(_ item: WheelItem, selected: Bool) -> some View {
+        VStack(spacing: 1) {
+            Text(item.title)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+            if let subtitle = item.subtitle {
+                Text(subtitle)
+                    .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                    .opacity(0.7)
+            }
+        }
+        .foregroundStyle(selected ? Color.white : Color.white.opacity(0.85))
+        .scaleEffect(selected ? 1.12 : 1)
+    }
+
+    @ViewBuilder private var center: some View {
+        switch model.status {
+        case .idle:
+            VStack(spacing: 3) {
+                Image(systemName: model.mode == .convert ? "arrow.triangle.2.circlepath" : "wand.and.stars")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(accent)
+                Text(model.mode == .convert ? "Convert" : "Tools")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                HStack(spacing: 4) {
+                    keycap("⇧", active: model.mode == .convert)
+                    keycap("⌘", active: model.mode == .tools)
+                }
+            }
+            .foregroundStyle(.white)
+        case .working:
+            ProgressView().controlSize(.small)
+        case .done(let count):
+            VStack(spacing: 2) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 26)).foregroundStyle(.green)
+                Text(count == 1 ? "Saved" : "Saved \(count)")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded)).foregroundStyle(.white)
+            }
+            .transition(.scale.combined(with: .opacity))
+        case .failed(let message):
+            VStack(spacing: 2) {
+                Image(systemName: "xmark.octagon.fill")
+                    .font(.system(size: 22)).foregroundStyle(.red)
+                Text(message)
+                    .font(.system(size: 9, weight: .medium, design: .rounded)).foregroundStyle(.white)
+                    .multilineTextAlignment(.center).lineLimit(3).frame(width: 90)
+            }
+        }
+    }
+
+    private func keycap(_ glyph: String, active: Bool) -> some View {
+        Text(glyph)
+            .font(.system(size: 10, weight: .bold, design: .rounded))
+            .frame(width: 18, height: 16)
+            .background(RoundedRectangle(cornerRadius: 4).fill(active ? AnyShapeStyle(accent) : AnyShapeStyle(Color.white.opacity(0.12))))
+    }
+}
