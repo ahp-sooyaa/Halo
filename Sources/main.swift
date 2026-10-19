@@ -96,11 +96,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
-        let id = response.notification.request.content.userInfo["job"] as? String
+        let paths = response.notification.request.content.userInfo[Notifier.outputsKey] as? [String] ?? []
         let tapped = response.actionIdentifier == UNNotificationDefaultActionIdentifier
             || response.actionIdentifier == Notifier.revealAction
         DispatchQueue.main.async {
-            if tapped, let id { JobCenter.shared.job(withID: id)?.revealOutputs() }
+            if tapped { Job.reveal(paths.map { URL(fileURLWithPath: $0) }) }
             completionHandler()
         }
     }
@@ -148,7 +148,9 @@ if let i = args.firstIndex(of: "--run"), args.count > i + 2 {
         let v = s.dropFirst(5).split(separator: ",").compactMap { Double($0) }
         action = v.count == 4 ? .crop(CGRect(x: v[0], y: v[1], width: v[2], height: v[3])) : nil
     case "fit": action = .fit(1920)
-    case let s where s.hasPrefix("scale"): action = Double(s.dropFirst(5)).map { .scale($0 / 100) }
+    case let s where s.hasPrefix("scale"):
+        // Shrink only: 1…99 percent.
+        action = Double(s.dropFirst(5)).flatMap { (1..<100).contains($0) ? .scale($0 / 100) : nil }
     default: action = ImageOps.formats.first { $0.name.lowercased() == name }.map { .convert($0.type) }
     }
     guard let action else {

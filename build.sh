@@ -16,7 +16,7 @@ fi
 
 swiftc -O -swift-version 5 -target arm64-apple-macos26 \
   -import-objc-header Sources/WebP-Bridging.h -Xcc -I"$WEBP/include" \
-  Sources/*.swift "$WEBP/lib/libwebp.a" "$WEBP/lib/libsharpyuv.a" \
+  Sources/*.swift "$WEBP/lib/libwebpmux.a" "$WEBP/lib/libwebp.a" "$WEBP/lib/libsharpyuv.a" \
   -o "$APP/Contents/MacOS/Halo"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'

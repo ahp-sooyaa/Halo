@@ -59,12 +59,14 @@ final class CropSession: ObservableObject {
         return ratios.contains { abs($0 - first) / first > 0.01 }
     }
 
-    /// The current image's crop. Setting it with "Same crop for all" on sets every image's crop.
+    /// The current image's crop. Setting it with "Same crop for all" on sets every image's crop,
+    /// re-fitted to each image's shape so the aspect ratio holds on all of them.
     var rect: CGRect {
         get { entries[current].rect }
         set {
             for i in sameForAll ? Array(entries.indices) : [current] {
-                entries[i].rect = newValue
+                entries[i].rect = i == current ? newValue
+                    : CropGeometry.conform(newValue, ratio: aspect.ratio, pixelSize: entries[i].pixelSize)
                 entries[i].edited = true
             }
         }
@@ -92,9 +94,8 @@ final class CropSession: ObservableObject {
     }
 
     func resetCurrent() {
-        let fresh = CropGeometry.largest(ratio: aspect.ratio, pixelSize: entry.pixelSize)
         for i in sameForAll ? Array(entries.indices) : [current] {
-            entries[i].rect = fresh
+            entries[i].rect = CropGeometry.largest(ratio: aspect.ratio, pixelSize: entries[i].pixelSize)
             entries[i].edited = false
         }
     }
@@ -103,22 +104,33 @@ final class CropSession: ObservableObject {
         current = (current + delta + entries.count) % entries.count
     }
 
+    /// One decode at a time; switching images cancels a load that hasn't started.
+    private let imageQueue = DispatchQueue(label: "halo.crop.image", qos: .userInitiated)
+    private var pendingLoad: DispatchWorkItem?
+
+    /// Loads the current image at screen resolution, which is all the canvas can show; the
+    /// crop itself is applied to the full-size file.
     private func loadCurrentImage() {
         currentImage = nil
+        pendingLoad?.cancel()
         let index = current, url = entries[current].url
-        DispatchQueue.global(qos: .userInitiated).async {
-            let image = try? ImageOps.load(url, oriented: true).0
+        let screen = NSScreen.main.map { max($0.frame.width, $0.frame.height) * $0.backingScaleFactor } ?? 3000
+        let maxSide = min(Int(screen), Int(max(entries[current].pixelSize.width, entries[current].pixelSize.height)))
+        let work = DispatchWorkItem {
+            let image = CropSession.thumbnail(url, maxPixelSize: maxSide) ?? (try? ImageOps.load(url).0)
             DispatchQueue.main.async {
                 if self.current == index { self.currentImage = image }
             }
         }
+        pendingLoad = work
+        imageQueue.async(execute: work)
     }
 
     private func loadThumbnails() {
         for (i, e) in entries.enumerated() {
             let url = e.url
             DispatchQueue.global(qos: .utility).async {
-                let thumb = CropSession.thumbnail(url)
+                let thumb = CropSession.thumbnail(url, maxPixelSize: 240)
                 DispatchQueue.main.async {
                     if i < self.entries.count, self.entries[i].url == url { self.entries[i].thumbnail = thumb }
                 }
@@ -126,12 +138,12 @@ final class CropSession: ObservableObject {
         }
     }
 
-    nonisolated static func thumbnail(_ url: URL) -> CGImage? {
+    nonisolated static func thumbnail(_ url: URL, maxPixelSize: Int) -> CGImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 240,
+            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize),
         ]
         return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
@@ -145,7 +157,7 @@ final class CropSession: ObservableObject {
             return (5...8).contains(orientation) ? CGSize(width: h, height: w) : CGSize(width: w, height: h)
         }
         // Formats ImageIO can't read (e.g. SVG) go through NSImage, as ImageOps.load does.
-        return (try? ImageOps.load(url, oriented: true)).map { CGSize(width: $0.0.width, height: $0.0.height) }
+        return (try? ImageOps.load(url)).map { CGSize(width: $0.0.width, height: $0.0.height) }
     }
 }
 

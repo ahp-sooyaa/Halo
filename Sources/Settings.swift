@@ -1,19 +1,37 @@
 import AppKit
 import SwiftUI
 
-/// Which wheel items are turned on. Stored as the set of turned-off keys, so items added in
-/// future versions appear enabled by default.
+/// Which wheel items are turned on, and where results are saved. Wheel items are stored as the
+/// set of turned-off keys, so items added in future versions appear enabled by default.
 @MainActor
 final class Settings: ObservableObject {
     static let shared = Settings()
     private static let defaultsKey = "disabledWheelItems"
+    private static let outputFolderKey = "outputFolder"
 
     @Published private var disabled: Set<String> {
         didSet { UserDefaults.standard.set(Array(disabled).sorted(), forKey: Self.defaultsKey) }
     }
 
+    /// nil saves next to each original.
+    @Published var outputFolder: URL? {
+        didSet { UserDefaults.standard.set(outputFolder?.path, forKey: Self.outputFolderKey) }
+    }
+
     private init() {
         disabled = Set(UserDefaults.standard.stringArray(forKey: Self.defaultsKey) ?? [])
+        outputFolder = UserDefaults.standard.string(forKey: Self.outputFolderKey).map { URL(fileURLWithPath: $0) }
+    }
+
+    /// Asks for a folder to save results to. Cancelling keeps the current choice.
+    func chooseOutputFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.directoryURL = outputFolder
+        if panel.runModal() == .OK, let url = panel.url { outputFolder = url }
     }
 
     private static func key(_ item: WheelItem, _ mode: WheelMode) -> String {
@@ -64,6 +82,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             section("Convert", key: "⇧", mode: .convert)
             section("Tools", key: "⌘", mode: .tools)
+            output
             Text("Turned-off items are hidden from the wheel. If every item in a wheel is off, its key does nothing.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -71,6 +90,40 @@ struct SettingsView: View {
         }
         .padding(20)
         .frame(width: 420)
+    }
+
+    private var output: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Save Results").font(.headline)
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("", selection: Binding(
+                    get: { settings.outputFolder != nil },
+                    set: { toFolder in
+                        if !toFolder { settings.outputFolder = nil } else if settings.outputFolder == nil { settings.chooseOutputFolder() }
+                    })) {
+                    Text("Next to the original").tag(false)
+                    Text("In a folder").tag(true)
+                }
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
+                // Always laid out, so the window (sized once) has room when a folder is picked.
+                HStack {
+                    Image(systemName: "folder")
+                    Text(settings.outputFolder?.path ?? " ").lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button("Change…") { settings.chooseOutputFolder() }.controlSize(.small)
+                }
+                .foregroundStyle(.secondary)
+                .opacity(settings.outputFolder == nil ? 0 : 1)
+                .disabled(settings.outputFolder == nil)
+                Text("If Halo can't write to the folder, results go to Downloads.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+        }
     }
 
     private func section(_ title: String, key: String, mode: WheelMode) -> some View {

@@ -21,6 +21,8 @@ enum ImageOpsError: LocalizedError {
     case noImages
     case nothingToTrim
     case webPTooLarge
+    case noResizeNeeded(Int)
+    case alreadyCompressed
     case unsupported
 
     var errorDescription: String? {
@@ -30,6 +32,8 @@ enum ImageOpsError: LocalizedError {
         case .noImages: return "No images"
         case .nothingToTrim: return "No border to trim"
         case .webPTooLarge: return "WebP max is \(WebP.maxDimension)px"
+        case .noResizeNeeded(let side): return "Already \(side)px or smaller"
+        case .alreadyCompressed: return "Already well compressed"
         case .unsupported: return "Not supported"
         }
     }
@@ -66,61 +70,75 @@ enum ImageOps {
 
     // MARK: - Running actions
 
-    static func run(_ action: ImageAction, on urls: [URL]) throws -> [URL] {
+    /// `outputFolder` nil saves next to each original.
+    static func run(_ action: ImageAction, on urls: [URL], outputFolder: URL? = nil) throws -> [URL] {
         let images = urls.filter(isImage)
         guard !images.isEmpty else { throw ImageOpsError.noImages }
-        if action == .pdf { return [try makePDF(images)] }
-        return try images.map { try run(action, on: $0) }
+        if action == .pdf { return [try makePDF(images, outputFolder: outputFolder)] }
+        return try images.map { try run(action, on: $0, outputFolder: outputFolder) }
     }
 
-    static func run(_ action: ImageAction, on url: URL) throws -> URL {
+    static func run(_ action: ImageAction, on url: URL, outputFolder: URL? = nil) throws -> URL {
         let sourceType = type(of: url) ?? .png
         let sameType = canEncode(sourceType) ? sourceType : .png
+        func save(_ image: CGImage, props: [CFString: Any], as type: UTType,
+                  quality: Double? = nil, suffix: String? = nil) throws -> URL {
+            try ImageOps.save(image, props: props, from: url, as: type, quality: quality, suffix: suffix,
+                              outputFolder: outputFolder)
+        }
 
         switch action {
         case .convert(let target):
-            let (image, props) = try load(url, oriented: false)
-            return try save(image, props: props, from: url, as: target)
+            let (image, props) = try load(url)
+            return try save(image, props: props, as: target)
 
         case .scale(let factor):
-            let (image, props) = try load(url, oriented: true)
+            let (image, props) = try load(url)
             let resized = scaled(image, by: factor)
-            return try save(resized, props: props, from: url, as: sameType, suffix: "\(Int(factor * 100))%")
+            return try save(resized, props: props, as: sameType, suffix: "\(Int(factor * 100))%")
 
         case .fit(let maxSide):
-            let (image, props) = try load(url, oriented: true)
-            let factor = min(1, Double(maxSide) / Double(max(image.width, image.height)))
-            return try save(scaled(image, by: factor), props: props, from: url, as: sameType, suffix: "\(maxSide)px")
+            let (image, props) = try load(url)
+            let factor = Double(maxSide) / Double(max(image.width, image.height))
+            guard factor < 1 else { throw ImageOpsError.noResizeNeeded(maxSide) }
+            return try save(scaled(image, by: factor), props: props, as: sameType, suffix: "\(maxSide)px")
 
         case .compress:
+            let (image, props) = try load(url)
             let lossy: [UTType] = [.jpeg, .heic, .webP, UTType("public.avif")].compactMap { $0 }.filter(canEncode)
-            let target = lossy.contains(sourceType) ? sourceType : .jpeg
-            let (image, props) = try load(url, oriented: false)
-            return try save(image, props: props, from: url, as: target,
-                            quality: target == sourceType ? 0.6 : 0.7, suffix: "compressed")
+            // WebP rather than JPEG when there's real transparency, so it isn't flattened onto white.
+            let target = lossy.contains(sourceType) ? sourceType : hasTransparency(image) ? .webP : .jpeg
+            let out = try save(image, props: props, as: target,
+                               quality: target == sourceType ? 0.6 : 0.7, suffix: "compressed")
+            let before = fileSize(url), after = fileSize(out)
+            if before > 0, after >= before {
+                try? FileManager.default.removeItem(at: out)
+                throw ImageOpsError.alreadyCompressed
+            }
+            return out
 
         case .strip:
-            let (image, _) = try load(url, oriented: true)
-            return try save(image, props: [:], from: url, as: sameType, suffix: "clean")
+            let (image, _) = try load(url)
+            return try save(image, props: [:], as: sameType, suffix: "clean")
 
         case .trim:
-            let (image, props) = try load(url, oriented: true)
+            let (image, props) = try load(url)
             guard let box = trimRect(image),
                   box.size != CGSize(width: image.width, height: image.height),
                   let trimmed = image.cropping(to: box) else { throw ImageOpsError.nothingToTrim }
-            return try save(trimmed, props: props, from: url, as: sameType, suffix: "trimmed")
+            return try save(trimmed, props: props, as: sameType, suffix: "trimmed")
 
         case .crop(let normalized):
-            let (image, props) = try load(url, oriented: true)
+            let (image, props) = try load(url)
             let W = CGFloat(image.width), H = CGFloat(image.height)
             let box = CGRect(x: normalized.minX * W, y: normalized.minY * H,
                              width: normalized.width * W, height: normalized.height * H)
                 .integral.intersection(CGRect(x: 0, y: 0, width: W, height: H))
             guard !box.isEmpty, let cropped = image.cropping(to: box) else { throw ImageOpsError.unsupported }
-            return try save(cropped, props: props, from: url, as: sameType, suffix: "cropped")
+            return try save(cropped, props: props, as: sameType, suffix: "cropped")
 
         case .pdf:
-            return try makePDF([url])
+            return try makePDF([url], outputFolder: outputFolder)
 
         case .cropInteractive:
             throw ImageOpsError.unsupported
@@ -129,30 +147,30 @@ enum ImageOps {
 
     // MARK: - Loading
 
-    /// Loads the first frame. `oriented` bakes the EXIF rotation into the pixels (needed before
-    /// resizing or dropping metadata) and resets the orientation tag to match.
-    static func load(_ url: URL, oriented: Bool) throws -> (CGImage, [CFString: Any]) {
+    /// Loads the first frame with the EXIF rotation baked into the pixels, and resets the
+    /// orientation tag to match. Many writers (WebP, AVIF, GIF, BMP) drop the tag, so the
+    /// pixels have to be upright.
+    static func load(_ url: URL) throws -> (CGImage, [CFString: Any]) {
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 {
             var props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
-            if oriented {
-                let w = props[kCGImagePropertyPixelWidth] as? Int ?? 0
-                let h = props[kCGImagePropertyPixelHeight] as? Int ?? 0
-                let options: [CFString: Any] = [
-                    kCGImageSourceCreateThumbnailFromImageAlways: true,
-                    kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceThumbnailMaxPixelSize: max(w, h, 1),
-                ]
-                if let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
-                    props[kCGImagePropertyOrientation] = 1
-                    if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
-                        tiff[kCGImagePropertyTIFFOrientation] = 1
-                        props[kCGImagePropertyTIFFDictionary] = tiff
-                    }
-                    props.removeValue(forKey: kCGImagePropertyPixelWidth)
-                    props.removeValue(forKey: kCGImagePropertyPixelHeight)
-                    return (image, props)
+            var side = max(props[kCGImagePropertyPixelWidth] as? Int ?? 0, props[kCGImagePropertyPixelHeight] as? Int ?? 0)
+            if side == 0, let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                // No size in the properties: decode once to find it, rather than ask for a 1px thumbnail.
+                side = max(image.width, image.height)
+            }
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: side,
+            ]
+            if side > 0, let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+                props[kCGImagePropertyOrientation] = 1
+                if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+                    tiff[kCGImagePropertyTIFFOrientation] = 1
+                    props[kCGImagePropertyTIFFDictionary] = tiff
                 }
-            } else if let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                props.removeValue(forKey: kCGImagePropertyPixelWidth)
+                props.removeValue(forKey: kCGImagePropertyPixelHeight)
                 return (image, props)
             }
         }
@@ -168,7 +186,7 @@ enum ImageOps {
 
     // MARK: - Pixel helpers
 
-    private static func rgbSpace(for image: CGImage) -> CGColorSpace {
+    static func rgbSpace(for image: CGImage) -> CGColorSpace {
         if let space = image.colorSpace, space.model == .rgb { return space }
         return CGColorSpace(name: CGColorSpace.sRGB)!
     }
@@ -201,16 +219,52 @@ enum ImageOps {
         return ctx.makeImage() ?? image
     }
 
+    /// 8-bit sRGB RGBA copy of the image, for reading pixels. Rows are top first.
+    private static func rgbaContext(_ image: CGImage) -> CGContext? {
+        guard let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              ctx.data != nil else { return nil }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return ctx
+    }
+
+    /// True when some pixel isn't fully opaque (an alpha channel alone doesn't count).
+    static func hasTransparency(_ image: CGImage) -> Bool {
+        switch image.alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast: return false
+        default: break
+        }
+        guard let ctx = rgbaContext(image), let data = ctx.data else { return true }
+        let px = data.assumingMemoryBound(to: UInt8.self)
+        for y in 0..<image.height {
+            let row = y * ctx.bytesPerRow
+            for x in 0..<image.width where px[row + x * 4 + 3] < 255 { return true }
+        }
+        return false
+    }
+
     // MARK: - Writing
 
+    private static func fileSize(_ url: URL) -> Int {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    }
+
+    /// The chosen folder, or the source's own; ~/Downloads when that one isn't writable.
+    static func outputDir(for source: URL, preferred: URL?) -> URL {
+        let dir = preferred ?? source.deletingLastPathComponent()
+        if FileManager.default.isWritableFile(atPath: dir.path) { return dir }
+        return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? dir
+    }
+
     private static func save(_ image: CGImage, props: [CFString: Any], from source: URL, as type: UTType,
-                             quality: Double? = nil, suffix: String? = nil) throws -> URL {
+                             quality: Double?, suffix: String?, outputFolder: URL?) throws -> URL {
         let base = source.deletingPathExtension().lastPathComponent
         let name = suffix.map { "\(base) \($0)" } ?? base
         let ext = type == .jpeg ? "jpg" : (type.preferredFilenameExtension ?? "img")
-        let out = try reserveURL(in: source.deletingLastPathComponent(), name: name, ext: ext)
+        let out = try reserveURL(in: outputDir(for: source, preferred: outputFolder), name: name, ext: ext)
         do {
-            try write(image, props: props, as: type, quality: quality, to: out)
+            try write(image, props: props, as: type, from: ImageOps.type(of: source), quality: quality, to: out)
         } catch {
             try? FileManager.default.removeItem(at: out)
             throw error
@@ -218,11 +272,13 @@ enum ImageOps {
         return out
     }
 
-    private static func write(_ image: CGImage, props: [CFString: Any], as type: UTType,
+    private static func write(_ image: CGImage, props: [CFString: Any], as type: UTType, from sourceType: UTType?,
                               quality: Double?, to out: URL) throws {
         if type == .webP && !canWrite(.webP) {
             guard max(image.width, image.height) <= WebP.maxDimension else { throw ImageOpsError.webPTooLarge }
-            guard let data = WebP.encode(image, quality: quality ?? 0.85) else {
+            // Lossless when converting from a lossless format, so screenshots and graphics stay sharp.
+            let lossless = quality == nil && [.png, .tiff, .gif, .bmp].contains { sourceType == $0 }
+            guard let data = WebP.encode(image, quality: quality ?? 0.85, lossless: lossless) else {
                 throw ImageOpsError.writeFailed(out.lastPathComponent)
             }
             do { try data.write(to: out) } catch { throw ImageOpsError.writeFailed(out.lastPathComponent) }
@@ -244,11 +300,7 @@ enum ImageOps {
     /// pixel's colour, i.e. the image without its uniform or transparent border.
     static func trimRect(_ image: CGImage) -> CGRect? {
         let w = image.width, h = image.height
-        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
-              let data = ctx.data else { return nil }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let ctx = rgbaContext(image), let data = ctx.data else { return nil }
         let px = data.assumingMemoryBound(to: UInt8.self)
         let stride = ctx.bytesPerRow
         let ref = (px[0], px[1], px[2], px[3])
@@ -269,7 +321,7 @@ enum ImageOps {
         return CGRect(x: left, y: top, width: right - left + 1, height: bottom - top + 1)
     }
 
-    private static func makePDF(_ urls: [URL]) throws -> URL {
+    private static func makePDF(_ urls: [URL], outputFolder: URL?) throws -> URL {
         let doc = PDFDocument()
         for url in urls {
             guard let image = NSImage(contentsOf: url), let page = PDFPage(image: image) else {
@@ -278,7 +330,7 @@ enum ImageOps {
             doc.insert(page, at: doc.pageCount)
         }
         let first = urls[0]
-        let out = try reserveURL(in: first.deletingLastPathComponent(),
+        let out = try reserveURL(in: outputDir(for: first, preferred: outputFolder),
                                  name: first.deletingPathExtension().lastPathComponent, ext: "pdf")
         guard doc.write(to: out) else {
             try? FileManager.default.removeItem(at: out)

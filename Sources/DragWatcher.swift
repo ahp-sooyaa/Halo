@@ -35,11 +35,12 @@ final class DragWatcher {
         }
 
         if !down {
-            // Remember the count while the button is up, so any change after mouse-down is a new drag.
-            baselineChangeCount = dragPasteboard.changeCount
             if mouseWasDown { onDragEnd?() }
             return
         }
+        // Remember the count at mouse-down, so any change after it is a new drag. Read only while
+        // the button is held, so an idle app doesn't ask the pasteboard server 60 times a second.
+        if !mouseWasDown { baselineChangeCount = dragPasteboard.changeCount }
         guard dragPasteboard.changeCount != baselineChangeCount else { return }
 
         let pressed = flags.subtracting(lastFlags)

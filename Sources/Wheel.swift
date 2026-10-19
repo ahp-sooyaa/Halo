@@ -110,6 +110,8 @@ final class WheelController {
             model.shown = false
             panel.orderFrontRegardless()
             DispatchQueue.main.async { self.model.shown = true }
+        } else {
+            model.shown = true // may be mid fade-out; the bumped generation cancelled the orderOut
         }
     }
 
@@ -126,12 +128,17 @@ final class WheelController {
         }
     }
 
-    /// Mouse released without dropping on a slice.
+    /// Mouse released. Over a slice the drop callback may still be on its way, so wait for it
+    /// briefly; `perform` cancels this hide.
     func dragEnded() {
-        if model.status == .idle { hide() }
+        guard model.status == .idle else { return }
+        hide(after: model.hovered == nil ? 0 : 0.5)
     }
 
     func perform(_ item: WheelItem, on urls: [URL]) {
+        // Cancel any hide queued by dragEnded, and undo its fade if it already started.
+        generation += 1
+        model.shown = true
         if item.action == .cropInteractive {
             let images = urls.filter(ImageOps.isImage)
             hide()

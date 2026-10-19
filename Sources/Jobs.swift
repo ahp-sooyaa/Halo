@@ -16,6 +16,8 @@ final class Job: ObservableObject, Identifiable {
 
     let units: [Unit]
     var inputs: [URL] { units.flatMap(\.urls) }
+    /// Where results go, from Settings when the job was made; nil means next to each original.
+    let outputFolder: URL?
 
     @Published fileprivate(set) var state: State = .queued
     @Published fileprivate(set) var completed = 0
@@ -37,6 +39,7 @@ final class Job: ObservableObject, Identifiable {
     init(title: String, units: [Unit]) {
         self.title = title
         self.units = units
+        self.outputFolder = Settings.shared.outputFolder
     }
 
     /// The same action on every file.
@@ -60,8 +63,11 @@ final class Job: ObservableObject, Identifiable {
         }
     }
 
-    func revealOutputs() {
-        let existing = outputs.filter { FileManager.default.fileExists(atPath: $0.path) }
+    func revealOutputs() { Self.reveal(outputs) }
+
+    /// Selects whichever of these files still exist in Finder.
+    static func reveal(_ urls: [URL]) {
+        let existing = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
         if !existing.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(existing) }
     }
 
@@ -116,8 +122,6 @@ final class JobCenter: ObservableObject {
         onChange?()
     }
 
-    func job(withID id: String) -> Job? { jobs.first { $0.id.uuidString == id } }
-
     private func startNextIfIdle() {
         guard !jobs.contains(where: { $0.state == .running }),
               let job = jobs.first(where: { $0.state == .queued }) else { return }
@@ -126,9 +130,10 @@ final class JobCenter: ObservableObject {
         // A few at a time: full-size photos decode to hundreds of MB each.
         job.operations.maxConcurrentOperationCount = max(2, min(4, ProcessInfo.processInfo.activeProcessorCount / 2))
         job.operations.qualityOfService = .userInitiated
+        let folder = job.outputFolder
         for unit in job.units {
             job.operations.addOperation {
-                let result = Result { try ImageOps.run(unit.action, on: unit.urls) }
+                let result = Result { try ImageOps.run(unit.action, on: unit.urls, outputFolder: folder) }
                 DispatchQueue.main.async { self.record(result, for: unit, in: job) }
             }
         }
@@ -173,6 +178,8 @@ final class JobCenter: ObservableObject {
 enum Notifier {
     nonisolated static let revealAction = "reveal"
     nonisolated static let category = "jobDone"
+    /// userInfo key for the output paths, so "Show in Finder" works after the job is gone.
+    nonisolated static let outputsKey = "outputs"
 
     static func setUp(delegate: UNUserNotificationCenterDelegate) {
         let center = UNUserNotificationCenter.current()
@@ -193,7 +200,7 @@ enum Notifier {
         content.body = summary(for: job)
         content.sound = .default
         content.categoryIdentifier = category
-        content.userInfo = ["job": job.id.uuidString]
+        content.userInfo = [outputsKey: job.outputs.prefix(500).map(\.path)]
         let request = UNNotificationRequest(identifier: job.id.uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
