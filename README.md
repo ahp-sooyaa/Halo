@@ -10,7 +10,9 @@ Quick jobs finish in the wheel. If a job takes longer than about 1.5 seconds, th
 
 Menu bar → **Settings…** turns individual formats and tools on or off, and picks where results are saved.
 
-WebP from a lossless source (PNG, TIFF, GIF, BMP) is encoded lossless and keeps the image's colour profile (e.g. Display P3). **Compress** turns images with transparency into WebP, and skips files it can't make smaller. **1920px** skips images that are already that small.
+WebP from a lossless source (PNG, TIFF, GIF, BMP) is encoded lossless and keeps the image's colour profile (e.g. Display P3). **Compress** turns images with transparency into WebP, skips files it can't make smaller, and shows the saving. **1920px** skips images that are already that small. Resizing keeps 16-bit depth and doesn't add an alpha channel. **PDF** fits each image onto an A4 page (Letter in the US and Canada), embeds JPEGs without re-encoding, and skips files it can't read.
+
+Finished jobs in the menu have **Show** and **Trash** (moves the results to the Trash); the completion notification has the same two actions. Results are written to a temporary file first, so a crash never leaves a half-written or empty file next to your images.
 
 No Accessibility or Input Monitoring permission is needed: mouse buttons, modifier keys and the drag pasteboard are polled.
 
@@ -34,7 +36,15 @@ Halo.app/Contents/MacOS/Halo --run pdf a.jpg b.png
 Halo.app/Contents/MacOS/Halo --demo tools      # show the wheel for a few seconds
 ```
 
-Actions: any format name, `pdf`, `scaleNN`, `fit`, `compress`, `strip`, `trim`, `crop:x,y,w,h` (fractions, origin top-left).
+Actions: any format name, `pdf`, `scaleNN` (1–99), `fit`, `compress`, `strip`, `trim`, `crop:x,y,w,h` (fractions, origin top-left). Output paths go to stdout and errors to stderr; the exit code is 1 if any file failed.
+
+## Tests
+
+```sh
+./Tests/run.sh    # rebuilds if needed, then runs the golden checks through --run
+```
+
+`Tests/make-fixtures.swift` generates the test images; `Tests/check.swift` reads facts back from the outputs (size, bit depth, alpha, colour space, PDF pages…).
 
 ## Layout
 

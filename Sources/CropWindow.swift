@@ -43,14 +43,22 @@ final class CropSession: ObservableObject {
     /// Full-resolution image for the current entry; the thumbnail stands in until it loads.
     @Published private(set) var currentImage: CGImage?
 
+    private static let aspectKey = "cropAspect"
+
     init(entries: [Entry]) {
         self.entries = entries
+        // Start with the aspect ratio used last time.
+        if let saved = UserDefaults.standard.string(forKey: Self.aspectKey).flatMap(Aspect.init(rawValue:)), saved != .free {
+            setAspect(saved)
+        }
         loadCurrentImage()
         loadThumbnails()
     }
 
     var entry: Entry { entries[current] }
     var cropCount: Int { entries.filter(\.willCrop).count }
+    /// Crops the user set by hand; a crop that only comes from the remembered aspect doesn't count.
+    var editedCount: Int { entries.filter { $0.edited && $0.willCrop }.count }
 
     /// True when the images have different shapes, so one shared crop lands in different places.
     var shapesDiffer: Bool {
@@ -74,6 +82,7 @@ final class CropSession: ObservableObject {
 
     func setAspect(_ aspect: Aspect) {
         self.aspect = aspect
+        UserDefaults.standard.set(aspect.rawValue, forKey: Self.aspectKey)
         if sameForAll {
             rect = entries[current].edited
                 ? CropGeometry.conform(rect, ratio: aspect.ratio, pixelSize: entry.pixelSize)
@@ -227,10 +236,25 @@ final class CropController: NSObject, NSWindowDelegate {
         self.urls = urls
     }
 
+    /// Reads each image's size off the main thread (it can mean a full decode, e.g. for SVG),
+    /// then opens the window.
     func start() {
-        let entries = urls.compactMap { url in
-            CropSession.pixelSize(of: url).map { CropSession.Entry(url: url, pixelSize: $0) }
+        let urls = self.urls
+        DispatchQueue.global(qos: .userInitiated).async {
+            let sizes = urls.compactMap { url in CropSession.pixelSize(of: url).map { (url, $0) } }
+            DispatchQueue.main.async {
+                self.open(sizes.map { CropSession.Entry(url: $0.0, pixelSize: $0.1) })
+            }
         }
+    }
+
+    /// Brings the open crop window to the front.
+    func focus() {
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func open(_ entries: [CropSession.Entry]) {
         guard !entries.isEmpty else {
             NSSound.beep()
             onFinish?()
@@ -270,10 +294,11 @@ final class CropController: NSObject, NSWindowDelegate {
 
     /// Asks before throwing away crops that were set but not saved.
     private func close(confirm: Bool) {
-        if confirm, let session, session.cropCount > 0 {
+        if confirm, let session, session.editedCount > 0 {
+            let n = session.editedCount
             let alert = NSAlert()
             alert.messageText = "Discard your crops?"
-            alert.informativeText = "\(session.cropCount) \(session.cropCount == 1 ? "image has" : "images have") a crop that hasn't been saved."
+            alert.informativeText = "\(n) \(n == 1 ? "image has" : "images have") a crop that hasn't been saved."
             alert.addButton(withTitle: "Discard")
             alert.addButton(withTitle: "Keep Editing")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -300,6 +325,8 @@ final class CropController: NSObject, NSWindowDelegate {
             if job.failures.isEmpty {
                 if !job.handedOff { NSSound(named: "Pop")?.play() }
             } else if !job.handedOff {
+                // The crop window is gone by now, so Halo is probably not the active app.
+                NSApp.activate(ignoringOtherApps: true)
                 let alert = NSAlert()
                 alert.messageText = "Some crops failed"
                 alert.informativeText = job.failures.map { "\($0.name): \($0.reason)" }.joined(separator: "\n")

@@ -47,7 +47,8 @@ final class Settings: ObservableObject {
     }
 
     func setAll(_ enabled: Bool, in mode: WheelMode) {
-        for item in WheelModel.catalog(for: mode) { setEnabled(enabled, item, in: mode) }
+        let keys = WheelModel.catalog(for: mode).map { Self.key($0, mode) }
+        disabled = enabled ? disabled.subtracting(keys) : disabled.union(keys) // one write, not one per item
     }
 
     func binding(_ item: WheelItem, in mode: WheelMode) -> Binding<Bool> {

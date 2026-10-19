@@ -1,6 +1,5 @@
 import AppKit
 import ImageIO
-import PDFKit
 import UniformTypeIdentifiers
 
 enum ImageAction: Equatable {
@@ -15,7 +14,7 @@ enum ImageAction: Equatable {
     case cropInteractive // opens the crop window; handled by WheelController
 }
 
-enum ImageOpsError: LocalizedError {
+enum ImageOpsError: LocalizedError, Equatable {
     case unreadable(String)
     case writeFailed(String)
     case noImages
@@ -23,6 +22,7 @@ enum ImageOpsError: LocalizedError {
     case webPTooLarge
     case noResizeNeeded(Int)
     case alreadyCompressed
+    case cancelled
     case unsupported
 
     var errorDescription: String? {
@@ -34,6 +34,7 @@ enum ImageOpsError: LocalizedError {
         case .webPTooLarge: return "WebP max is \(WebP.maxDimension)px"
         case .noResizeNeeded(let side): return "Already \(side)px or smaller"
         case .alreadyCompressed: return "Already well compressed"
+        case .cancelled: return "Cancelled"
         case .unsupported: return "Not supported"
         }
     }
@@ -68,19 +69,40 @@ enum ImageOps {
         type(of: url)?.conforms(to: .image) ?? false
     }
 
+    /// Output type for "same format" actions: the source's own when it can be written, else JPEG
+    /// for camera RAW and PNG for the rest (e.g. SVG).
+    static func sameType(for source: UTType) -> UTType {
+        if canEncode(source) { return source }
+        return source.conforms(to: .rawImage) ? .jpeg : .png
+    }
+
     // MARK: - Running actions
 
-    /// `outputFolder` nil saves next to each original.
-    static func run(_ action: ImageAction, on urls: [URL], outputFolder: URL? = nil) throws -> [URL] {
+    /// What a run produced. A file that fails is listed in `failures` without stopping the rest.
+    struct Outcome {
+        var outputs: [URL] = []
+        var failures: [(name: String, reason: String)] = []
+    }
+
+    /// `outputFolder` nil saves next to each original. `isCancelled` is checked between files
+    /// (and between PDF pages); a cancelled run throws `.cancelled`.
+    static func run(_ action: ImageAction, on urls: [URL], outputFolder: URL? = nil,
+                    isCancelled: () -> Bool = { false }) throws -> Outcome {
         let images = urls.filter(isImage)
         guard !images.isEmpty else { throw ImageOpsError.noImages }
-        if action == .pdf { return [try makePDF(images, outputFolder: outputFolder)] }
-        return try images.map { try run(action, on: $0, outputFolder: outputFolder) }
+        if action == .pdf { return try makePDF(images, outputFolder: outputFolder, isCancelled: isCancelled) }
+        var outcome = Outcome()
+        for url in images {
+            if isCancelled() { throw ImageOpsError.cancelled }
+            do { outcome.outputs.append(try run(action, on: url, outputFolder: outputFolder)) }
+            catch { outcome.failures.append((url.lastPathComponent, error.localizedDescription)) }
+        }
+        return outcome
     }
 
     static func run(_ action: ImageAction, on url: URL, outputFolder: URL? = nil) throws -> URL {
         let sourceType = type(of: url) ?? .png
-        let sameType = canEncode(sourceType) ? sourceType : .png
+        let sameType = sameType(for: sourceType)
         func save(_ image: CGImage, props: [CFString: Any], as type: UTType,
                   quality: Double? = nil, suffix: String? = nil) throws -> URL {
             try ImageOps.save(image, props: props, from: url, as: type, quality: quality, suffix: suffix,
@@ -138,7 +160,7 @@ enum ImageOps {
             return try save(cropped, props: props, as: sameType, suffix: "cropped")
 
         case .pdf:
-            return try makePDF([url], outputFolder: outputFolder)
+            return try makePDF([url], outputFolder: outputFolder, isCancelled: { false }).outputs[0]
 
         case .cropInteractive:
             throw ImageOpsError.unsupported
@@ -191,13 +213,27 @@ enum ImageOps {
         return CGColorSpace(name: CGColorSpace.sRGB)!
     }
 
+    private static func hasAlphaChannel(_ image: CGImage) -> Bool {
+        switch image.alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast: return false
+        default: return true
+        }
+    }
+
+    /// Keeps the source's pixel format where it can: no alpha channel added to opaque images,
+    /// and 16 bits per component for deep (16-bit, float) sources.
     private static func scaled(_ image: CGImage, by factor: Double) -> CGImage {
         guard factor < 1 else { return image }
         let w = max(1, Int((Double(image.width) * factor).rounded()))
         let h = max(1, Int((Double(image.height) * factor).rounded()))
-        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: rgbSpace(for: image),
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return image }
+        let deep = image.bitsPerComponent > 8
+        var info = (hasAlphaChannel(image) ? CGImageAlphaInfo.premultipliedLast : .noneSkipLast).rawValue
+        if deep { info |= CGBitmapInfo.byteOrder16Little.rawValue }
+        let space = rgbSpace(for: image)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: deep ? 16 : 8, bytesPerRow: 0,
+                                  space: space, bitmapInfo: info)
+                ?? CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return image }
         ctx.interpolationQuality = .high
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         return ctx.makeImage() ?? image
@@ -205,11 +241,7 @@ enum ImageOps {
 
     /// JPEG has no alpha; without this transparent areas turn black.
     private static func flattened(_ image: CGImage) -> CGImage {
-        switch image.alphaInfo {
-        case .none, .noneSkipFirst, .noneSkipLast: return image
-        default: break
-        }
-        guard let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+        guard hasAlphaChannel(image), let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
                                   bytesPerRow: 0, space: rgbSpace(for: image),
                                   bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return image }
         let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
@@ -231,11 +263,7 @@ enum ImageOps {
 
     /// True when some pixel isn't fully opaque (an alpha channel alone doesn't count).
     static func hasTransparency(_ image: CGImage) -> Bool {
-        switch image.alphaInfo {
-        case .none, .noneSkipFirst, .noneSkipLast: return false
-        default: break
-        }
-        guard let ctx = rgbaContext(image), let data = ctx.data else { return true }
+        guard hasAlphaChannel(image), let ctx = rgbaContext(image), let data = ctx.data else { return true }
         let px = data.assumingMemoryBound(to: UInt8.self)
         for y in 0..<image.height {
             let row = y * ctx.bytesPerRow
@@ -246,7 +274,7 @@ enum ImageOps {
 
     // MARK: - Writing
 
-    private static func fileSize(_ url: URL) -> Int {
+    static func fileSize(_ url: URL) -> Int {
         (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
     }
 
@@ -262,14 +290,9 @@ enum ImageOps {
         let base = source.deletingPathExtension().lastPathComponent
         let name = suffix.map { "\(base) \($0)" } ?? base
         let ext = type == .jpeg ? "jpg" : (type.preferredFilenameExtension ?? "img")
-        let out = try reserveURL(in: outputDir(for: source, preferred: outputFolder), name: name, ext: ext)
-        do {
-            try write(image, props: props, as: type, from: ImageOps.type(of: source), quality: quality, to: out)
-        } catch {
-            try? FileManager.default.removeItem(at: out)
-            throw error
+        return try place(in: outputDir(for: source, preferred: outputFolder), name: name, ext: ext) { temp in
+            try write(image, props: props, as: type, from: ImageOps.type(of: source), quality: quality, to: temp)
         }
-        return out
     }
 
     private static func write(_ image: CGImage, props: [CFString: Any], as type: UTType, from sourceType: UTType?,
@@ -321,27 +344,117 @@ enum ImageOps {
         return CGRect(x: left, y: top, width: right - left + 1, height: bottom - top + 1)
     }
 
-    private static func makePDF(_ urls: [URL], outputFolder: URL?) throws -> URL {
-        let doc = PDFDocument()
-        for url in urls {
-            guard let image = NSImage(contentsOf: url), let page = PDFPage(image: image) else {
-                throw ImageOpsError.unreadable(url.lastPathComponent)
-            }
-            doc.insert(page, at: doc.pageCount)
-        }
+    // MARK: - PDF
+
+    /// One page per image, each fitted onto A4 (Letter in the US and Canada) turned to match the
+    /// image, never enlarged past 1 px = 1 pt. Images are drawn as stored with the EXIF rotation
+    /// applied as a transform, so JPEGs are embedded as-is instead of re-encoded (about 3× smaller).
+    /// Unreadable images are skipped and reported; it throws only when no page could be made.
+    private static func makePDF(_ urls: [URL], outputFolder: URL?, isCancelled: () -> Bool) throws -> Outcome {
+        var outcome = Outcome()
         let first = urls[0]
-        let out = try reserveURL(in: outputDir(for: first, preferred: outputFolder),
-                                 name: first.deletingPathExtension().lastPathComponent, ext: "pdf")
-        guard doc.write(to: out) else {
-            try? FileManager.default.removeItem(at: out)
-            throw ImageOpsError.writeFailed(out.lastPathComponent)
+        let out = try place(in: outputDir(for: first, preferred: outputFolder),
+                            name: first.deletingPathExtension().lastPathComponent, ext: "pdf") { temp in
+            guard let ctx = CGContext(temp as CFURL, mediaBox: nil, [kCGPDFContextCreator: "Halo"] as CFDictionary) else {
+                throw ImageOpsError.writeFailed(temp.lastPathComponent)
+            }
+            var pages = 0
+            for url in urls {
+                if isCancelled() { throw ImageOpsError.cancelled }
+                guard let (image, orientation) = storedImage(url) else {
+                    outcome.failures.append((url.lastPathComponent, ImageOpsError.unreadable(url.lastPathComponent).localizedDescription))
+                    continue
+                }
+                drawPage(image, orientation: orientation, in: ctx)
+                pages += 1
+            }
+            ctx.closePDF()
+            guard pages > 0 else { throw ImageOpsError.unreadable(urls.map(\.lastPathComponent).joined(separator: ", ")) }
         }
-        return out
+        outcome.outputs = [out]
+        return outcome
+    }
+
+    /// The first frame as stored, plus its EXIF orientation. Formats ImageIO can't decode go
+    /// through `load` (already upright).
+    private static func storedImage(_ url: URL) -> (CGImage, Int)? {
+        if let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0,
+           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+            let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+            return (image, props?[kCGImagePropertyOrientation] as? Int ?? 1)
+        }
+        return (try? load(url)).map { ($0.0, 1) }
+    }
+
+    static func pageSize(landscape: Bool) -> CGSize {
+        let letter = ["US", "CA"].contains(Locale.current.region?.identifier ?? "")
+        let size = letter ? CGSize(width: 612, height: 792) : CGSize(width: 595.28, height: 841.89)
+        return landscape ? CGSize(width: size.height, height: size.width) : size
+    }
+
+    private static func drawPage(_ image: CGImage, orientation: Int, in ctx: CGContext) {
+        let w = CGFloat(image.width), h = CGFloat(image.height)
+        let upright = (5...8).contains(orientation) ? CGSize(width: h, height: w) : CGSize(width: w, height: h)
+        var box = CGRect(origin: .zero, size: pageSize(landscape: upright.width > upright.height))
+        let margin: CGFloat = 18
+        let scale = min(1, (box.width - 2 * margin) / upright.width, (box.height - 2 * margin) / upright.height)
+        ctx.beginPage(mediaBox: &box)
+        ctx.translateBy(x: (box.width - upright.width * scale) / 2, y: (box.height - upright.height * scale) / 2)
+        ctx.scaleBy(x: scale, y: scale)
+        ctx.concatenate(uprightTransform(orientation, width: w, height: h))
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.endPage()
+    }
+
+    /// Maps an image drawn at CGRect(0, 0, w, h), its stored size, to its upright position for
+    /// EXIF orientation 1…8, in y-up coordinates.
+    static func uprightTransform(_ orientation: Int, width w: CGFloat, height h: CGFloat) -> CGAffineTransform {
+        switch orientation {
+        case 2: return CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: w, ty: 0)  // mirrored
+        case 3: return CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: w, ty: h) // 180°
+        case 4: return CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: h)  // flipped
+        case 5: return CGAffineTransform(a: 0, b: -1, c: -1, d: 0, tx: h, ty: w) // transposed
+        case 6: return CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: 0, ty: w)  // 90° clockwise
+        case 7: return CGAffineTransform(a: 0, b: 1, c: 1, d: 0, tx: 0, ty: 0)   // transversed
+        case 8: return CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: h, ty: 0)  // 90° anticlockwise
+        default: return .identity
+        }
+    }
+
+    // MARK: - Placing output files
+
+    /// Writes the file with `body` to a temporary location on the same volume, then links it in
+    /// as "photo.png", "photo 2.png", "photo 3.png"… `link` fails instead of replacing an existing
+    /// name, so parallel jobs can't collide and nothing is overwritten, and a crash mid-write
+    /// leaves nothing in `dir` (the system cleans its temporary folders).
+    static func place(in dir: URL, name: String, ext: String, write body: (URL) throws -> Void) throws -> URL {
+        let fm = FileManager.default
+        let scratch = try? fm.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: dir, create: true)
+        let temp = scratch?.appendingPathComponent("out.\(ext)")
+            ?? dir.appendingPathComponent(".halo-\(UUID().uuidString).\(ext)")
+        defer { try? fm.removeItem(at: scratch ?? temp) }
+        try body(temp)
+        for n in 1...10_000 {
+            let candidate = dir.appendingPathComponent(n == 1 ? name : "\(name) \(n)").appendingPathExtension(ext)
+            if link(temp.path, candidate.path) == 0 { return candidate }
+            if errno == EEXIST { continue }
+            // No hard links on this volume (e.g. exFAT): claim the name, then move the file over it.
+            let out = try reserveURL(in: dir, name: name, ext: ext)
+            do {
+                _ = try fm.replaceItemAt(out, withItemAt: temp)
+                return out
+            } catch {
+                try? fm.removeItem(at: out)
+                throw ImageOpsError.writeFailed(out.lastPathComponent)
+            }
+        }
+        throw ImageOpsError.writeFailed("\(name).\(ext)")
     }
 
     /// Claims "photo.png", then "photo 2.png", "photo 3.png"… by creating an empty file with
     /// O_EXCL, so files converted in parallel can't pick the same name. Never overwrites anything.
-    static func reserveURL(in dir: URL, name: String, ext: String) throws -> URL {
+    private static func reserveURL(in dir: URL, name: String, ext: String) throws -> URL {
         for n in 1...10_000 {
             let candidate = dir.appendingPathComponent(n == 1 ? name : "\(name) \(n)").appendingPathExtension(ext)
             let fd = open(candidate.path, O_CREAT | O_EXCL | O_WRONLY, 0o644)

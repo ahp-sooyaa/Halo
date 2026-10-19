@@ -10,6 +10,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private let watcher = DragWatcher()
     private let settingsWindow = SettingsWindowController()
     private let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
+    /// The menu while it's open, and the job rows it was built with, so it can be rebuilt when
+    /// jobs are added, removed or finish (rows change height) while it's showing.
+    private var openMenu: NSMenu?
+    private var menuJobs: [String] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -21,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         loginItem.target = self
 
         Notifier.setUp(delegate: self)
-        JobCenter.shared.onChange = { [weak self] in self?.refreshIcon() }
+        JobCenter.shared.onChange = { [weak self] in self?.jobsChanged() }
 
         watcher.onKeyTap = { [weak self] mode, urls in
             guard let self else { return }
@@ -45,8 +49,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     // MARK: Menu
 
+    func menuWillOpen(_ menu: NSMenu) { openMenu = menu }
+    func menuDidClose(_ menu: NSMenu) { openMenu = nil }
+
+    private static func rowKeys() -> [String] { JobCenter.shared.jobs.map { "\($0.id) \($0.isActive)" } }
+
+    private func jobsChanged() {
+        refreshIcon()
+        if let openMenu, Self.rowKeys() != menuJobs { menuNeedsUpdate(openMenu) }
+    }
+
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        menuJobs = Self.rowKeys()
         let help = NSMenuItem(title: "Drag an image, tap ⇧ to convert, ⌘ for tools", action: nil, keyEquivalent: "")
         help.isEnabled = false
         menu.addItem(help)
@@ -96,11 +111,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
-        let paths = response.notification.request.content.userInfo[Notifier.outputsKey] as? [String] ?? []
-        let tapped = response.actionIdentifier == UNNotificationDefaultActionIdentifier
-            || response.actionIdentifier == Notifier.revealAction
+        let urls = (response.notification.request.content.userInfo[Notifier.outputsKey] as? [String] ?? [])
+            .map { URL(fileURLWithPath: $0) }
+        let action = response.actionIdentifier
         DispatchQueue.main.async {
-            if tapped { Job.reveal(paths.map { URL(fileURLWithPath: $0) }) }
+            switch action {
+            case UNNotificationDefaultActionIdentifier, Notifier.revealAction: Job.reveal(urls)
+            case Notifier.trashAction: Job.trash(urls)
+            default: break
+            }
             completionHandler()
         }
     }
@@ -157,11 +176,14 @@ if let i = args.firstIndex(of: "--run"), args.count > i + 2 {
         print("Unknown action. Formats: \(ImageOps.formats.map(\.name).joined(separator: ", "))")
         exit(2)
     }
+    func printError(_ message: String) { FileHandle.standardError.write(Data("Error: \(message)\n".utf8)) }
     do {
-        for out in try ImageOps.run(action, on: files) { print(out.path) }
-        exit(0)
+        let outcome = try ImageOps.run(action, on: files)
+        for out in outcome.outputs { print(out.path) }
+        for failure in outcome.failures { printError("\(failure.name): \(failure.reason)") }
+        exit(outcome.failures.isEmpty ? 0 : 1)
     } catch {
-        print("Error: \(error.localizedDescription)")
+        printError(error.localizedDescription)
         exit(1)
     }
 }

@@ -17,14 +17,17 @@ enum WheelGeometry {
 
 @MainActor
 final class WheelModel: ObservableObject {
-    enum Status: Equatable { case idle, working(done: Int, total: Int), done(saved: Int, failed: Int), failed(String) }
+    enum Status: Equatable {
+        case idle, working(done: Int, total: Int), failed(String)
+        /// `note` is extra detail, e.g. Compress's "-75%".
+        case done(saved: Int, failed: Int, note: String?)
+    }
 
     @Published var mode: WheelMode = .convert
     @Published var items: [WheelItem] = []
     @Published var hovered: Int?
     @Published var status: Status = .idle
     @Published var shown = false
-    @Published var fileCount = 0
 
     /// What the wheel shows for these files: the catalog minus items turned off in Settings,
     /// and minus the files' own format on the Convert wheel.
@@ -71,7 +74,7 @@ final class WheelModel: ObservableObject {
         guard !items.isEmpty else { return nil }
         let dx = p.x - bounds.midX, dy = p.y - bounds.midY
         let r = hypot(dx, dy)
-        guard r > WheelGeometry.inner, r < WheelGeometry.size / 2 else { return nil }
+        guard r > WheelGeometry.inner, r < WheelGeometry.outer else { return nil }
         var angle = atan2(dx, dy) // clockwise from 12 o'clock
         if angle < 0 { angle += 2 * .pi }
         let width = 2 * .pi / Double(items.count)
@@ -99,7 +102,6 @@ final class WheelController {
         generation += 1
         model.mode = mode
         model.items = items
-        model.fileCount = urls.count
         model.hovered = nil
         model.status = .idle
 
@@ -139,10 +141,16 @@ final class WheelController {
         // Cancel any hide queued by dragEnded, and undo its fade if it already started.
         generation += 1
         model.shown = true
+        let images = urls.filter(ImageOps.isImage)
         if item.action == .cropInteractive {
-            let images = urls.filter(ImageOps.isImage)
             hide()
-            guard !images.isEmpty, cropper == nil else { return }
+            guard !images.isEmpty else { return }
+            if let cropper {
+                // One crop window at a time: point at the open one.
+                NSSound.beep()
+                cropper.focus()
+                return
+            }
             // Open after the drag session has fully ended, or Finder keeps focus.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 guard let self else { return }
@@ -153,7 +161,6 @@ final class WheelController {
             }
             return
         }
-        let images = urls.filter(ImageOps.isImage)
         guard !images.isEmpty else {
             model.status = .failed(ImageOpsError.noImages.localizedDescription)
             NSSound.beep()
@@ -179,7 +186,8 @@ final class WheelController {
                 NSSound.beep()
                 self.hide(after: 2)
             } else {
-                self.model.status = .done(saved: job.outputs.count, failed: job.failures.count)
+                let note = job.savingPercent.map { "\($0)%" }
+                self.model.status = .done(saved: job.outputs.count, failed: job.failures.count, note: note)
                 NSSound(named: "Pop")?.play()
                 self.hide(after: job.failures.isEmpty ? 0.8 : 1.6)
             }
@@ -391,12 +399,17 @@ struct WheelView: View {
             .animation(.easeOut(duration: 0.2), value: done)
         case .working:
             ProgressView().controlSize(.small)
-        case .done(let saved, let failed):
+        case .done(let saved, let failed, let note):
             VStack(spacing: 2) {
                 Image(systemName: failed == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                     .font(.system(size: 26)).foregroundStyle(failed == 0 ? .green : .orange)
                 Text(failed > 0 ? "\(saved) saved · \(failed) failed" : saved == 1 ? "Saved" : "Saved \(saved)")
                     .font(.system(size: 11, weight: .semibold, design: .rounded)).foregroundStyle(.white)
+                if let note {
+                    Text(note)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded)).monospacedDigit()
+                        .foregroundStyle(.green)
+                }
             }
             .transition(.scale.combined(with: .opacity))
         case .failed(let message):

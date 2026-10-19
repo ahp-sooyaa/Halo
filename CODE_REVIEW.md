@@ -3,7 +3,11 @@
 Reviewed: every file under `Sources/`, plus `build.sh` and `README.md`, at commit `42d8539` (2026-10-19).
 Line numbers refer to that commit.
 
-**Status (2026-10-19):** the items in the §5 priority list are fixed. Each fixed heading is marked ✅; the rest are still open.
+This file is the single source of truth for what's fixed, what's open, and why. Plan future rounds from it.
+
+**Status (2026-10-19):** two rounds of fixes are done, on branch `fix-review-priorities`. `./Tests/run.sh` passes 40/40. The round-2 in-app checks haven't been done by hand yet: menu refresh while open, Crop… focusing the open window, the crop failure alert, the Trash button and notification action, and the remembered crop aspect.
+
+Markers: ✅ fixed · ❌ checked and not a bug · **Deferred:** real, but intentionally not done yet (the reason is given) · unmarked = open, not yet considered.
 
 Severity key: **High** = wrong output or lost work a user will hit · **Medium** = real bug in a narrower case, or a weakness that bites on big inputs · **Low** = polish, cleanup, or edge case.
 
@@ -74,22 +78,22 @@ The oriented path asks for a thumbnail with `max(w, h, 1)` as its size. If the s
 
 *Fix:* compare output and input size, and drop the output (or keep the original) if it isn't smaller. For PNG with alpha, use HEIC/WebP (which keep alpha) or do lossless PNG optimisation.
 
-### 1.9 Low — Cancel can label a job that already finished as "Cancelled"
+### ✅ 1.9 Low — Cancel can label a job that already finished as "Cancelled"
 `Sources/Jobs.swift:48-61`, `Sources/Jobs.swift:151-153`
 
 If Cancel is clicked after the last operation has finished, but before the barrier's `finish` reaches the main queue, `cancelRequested` is already set, so a job that produced every file is shown as "Cancelled". This is cosmetic, but confusing.
 
-### 1.10 Low — Dropping onto Crop… while a crop window is open does nothing
+### ✅ 1.10 Low — Dropping onto Crop… while a crop window is open does nothing
 `Sources/Wheel.swift:138`
 
 `guard ..., cropper == nil else { return }` drops the request with no beep and doesn't bring the existing window forward.
 
-### 1.11 Low — The crop failure alert can open behind other apps
+### ✅ 1.11 Low — The crop failure alert can open behind other apps
 `Sources/CropWindow.swift:290-295`
 
 The job finishes after the crop window has closed, so the accessory app is usually not active, and `runModal()` can show up behind Finder. Activate the app first, or use a notification.
 
-### 1.12 Low — The menu doesn't update while it's open
+### ✅ 1.12 Low — The menu doesn't update while it's open
 `Sources/main.swift:48-80`
 
 Rows update live, but the list itself is built only in `menuNeedsUpdate`. If a job is added or pruned while the menu is open, or a row's height changes when its progress bar disappears, the menu isn't redrawn.
@@ -101,44 +105,54 @@ Rows update live, but the list itself is built only in `menuNeedsUpdate`. If a j
 ### Image quality
 - ✅ **WebP is always lossy (q 0.85).** A PNG screenshot converted to WebP gets blurry text and edges. Use `WebPEncodeLosslessRGBA` (or `config.lossless`) when the source is lossless. `Sources/WebP.swift:25`
 - ✅ (WebP part) **Colour space is flattened to sRGB with no ICC profile.** WebP encoding and `trimRect` draw into sRGB. Display-P3 iPhone photos lose their wide gamut in WebP. `scaled()` keeps the colour space, but `WebP.encode` doesn't embed a profile. `Sources/WebP.swift:14`
-- **Bit depth is cut to 8 bits and HDR is dropped.** `scaled()`/`flattened()` use 8-bit RGBA contexts, so 16-bit PNG/TIFF and HDR HEIC (gain maps) lose quality on resize, compress, and PDF. `Sources/ImageOps.swift:180`, `:194`
-- **Resized images gain an alpha channel.** `scaled()` always uses `premultipliedLast`, so opaque PNGs come out with an alpha channel and are bigger. `Sources/ImageOps.swift:182`
-- **Stale metadata after resizing/cropping.** `{Exif}` `PixelXDimension`/`PixelYDimension` still hold the original size. `Sources/ImageOps.swift:151-152` removes only the top-level keys.
-- **The "same format" fallback is PNG.** RAW (DNG/CR2/ARW) and other formats ImageIO can't write become very large PNGs on resize, strip, or crop. JPEG or HEIC would be a better default for photos. `Sources/ImageOps.swift:78`
+- ✅ (16-bit part) **Bit depth is cut to 8 bits and HDR is dropped.** `scaled()`/`flattened()` use 8-bit RGBA contexts, so 16-bit PNG/TIFF and HDR HEIC (gain maps) lose quality on resize, compress, and PDF. `Sources/ImageOps.swift:180`, `:194`
+  *Fixed:* `scaled()` keeps 16 bits/component for deep sources. `flattened()` stays 8-bit on purpose, since it only feeds JPEG/BMP, which are 8-bit formats.
+  **Deferred (HDR):** keeping gain maps needs ImageIO's HDR decode/encode options on every path (load, scale, crop, write). That's a project of its own, with its own test images.
+- ✅ **Resized images gain an alpha channel.** `scaled()` always uses `premultipliedLast`, so opaque PNGs come out with an alpha channel and are bigger. `Sources/ImageOps.swift:182`
+- ❌ *Not a bug (ImageIO rewrites the Exif dimensions on write; checked):* **Stale metadata after resizing/cropping.** `{Exif}` `PixelXDimension`/`PixelYDimension` still hold the original size. `Sources/ImageOps.swift:151-152` removes only the top-level keys.
+- ✅ **The "same format" fallback is PNG.** *Fixed:* camera RAW now falls back to JPEG; other formats ImageIO can't write (e.g. SVG) still go to PNG. RAW (DNG/CR2/ARW) and other formats ImageIO can't write become very large PNGs on resize, strip, or crop. JPEG or HEIC would be a better default for photos. `Sources/ImageOps.swift:78`
 
 ### PDF
-- **The page size comes from the image's DPI.** `PDFPage(image:)` turns a 6000 px, 72 dpi photo into an 83-inch page. Fit pages to A4/Letter, or use a fixed DPI. `Sources/ImageOps.swift:275`
-- **A PDF is one unit,** so there's no progress (0/1), Cancel does nothing until it's done, and one unreadable image fails the whole PDF. `Sources/Jobs.swift:44`, `Sources/ImageOps.swift:275-277`
+- ✅ **The page size comes from the image's DPI.** `PDFPage(image:)` turns a 6000 px, 72 dpi photo into an 83-inch page. Fit pages to A4/Letter, or use a fixed DPI. `Sources/ImageOps.swift:275`
+  *Fixed:* pages are A4 (Letter in the US and Canada), turned to match the image, with 18 pt margins and no enlarging past 1 px = 1 pt. Pages draw the *stored* image, with the EXIF rotation applied as a transform. That's deliberate: drawing decoded pixels made the PDF 3.3× bigger, while the stored JPEG is embedded as-is. Tests cover all 8 orientations and the passthrough.
+- ✅ (except per-page progress) **A PDF is one unit,** so there's no progress (0/1), Cancel does nothing until it's done, and one unreadable image fails the whole PDF. `Sources/Jobs.swift:44`, `Sources/ImageOps.swift:275-277`
+  *Fixed:* unreadable images are skipped and reported, and Cancel is checked between pages.
+  **Deferred (per-page progress):** a PDF is still one unit, so progress goes 0/1 → 1/1. Showing pages needs a progress callback from `ImageOps` into `Job`, which is low value for typical PDF sizes.
 
 ### Performance
 - ✅ **The drag pasteboard is polled 60×/s even when idle.** `baselineChangeCount = dragPasteboard.changeCount` runs on every tick while the button is up, which means a pasteboard-server round-trip 60 times a second for the life of the app. Read the baseline only when the button goes down, and/or poll less often while the mouse is up. `Sources/DragWatcher.swift:37-39`
 - ✅ **The crop window decodes full-resolution images just to show them.** Each arrow-key press starts a new full decode on a global queue (hundreds of MB each for big photos), and earlier ones aren't cancelled. A downsampled image at about 2× the window size is enough for display, and the crop itself already reloads at full size. `Sources/CropWindow.swift:106-115`
-- **`CropController.start()` reads every file's properties on the main thread** (and fully decodes SVGs through NSImage). With a large drop, this freezes the UI before the window opens. `Sources/CropWindow.swift:219-221`
-- **Memory per job:** 2–4 concurrent full decodes, each with more full-size copies (`trimRect`, `flattened`, WebP buffer). This is fine for normal photos but risky for 100 MP+ or very large TIFFs, with no guard.
+- ✅ **`CropController.start()` reads every file's properties on the main thread** (and fully decodes SVGs through NSImage). With a large drop, this freezes the UI before the window opens. `Sources/CropWindow.swift:219-221`
+- **Deferred: Memory per job.** 2–4 concurrent full decodes, each with more full-size copies (`trimRect`, `flattened`, WebP buffer). This is fine for normal photos but risky for 100 MP+ or very large TIFFs, with no guard.
+  *Why deferred:* not seen in practice yet. A real fix (lowering concurrency by pixel count, or streaming tiles) needs measurement on very large files first.
 
 ### Robustness
 - ✅ **Output always goes next to the original.** A read-only folder (mounted DMG, network share, another user's folder) fails with "Can't write" and there's no fallback (for example, Downloads or a chosen folder). `Sources/ImageOps.swift:211`
-- **`reserveURL` creates an empty placeholder file first.** If the app crashes or is force-quit mid-job, 0-byte files are left behind. Write to a temp file and `link`/rename into the reserved name, or clean up on launch. `Sources/ImageOps.swift:292-303`
-- **Only the first frame is used** for animated GIF/WebP/HEICS (documented). Resizing or converting an animated GIF quietly turns it into a still.
+- ✅ **`reserveURL` creates an empty placeholder file first.** If the app crashes or is force-quit mid-job, 0-byte files are left behind. Write to a temp file and `link`/rename into the reserved name, or clean up on launch. `Sources/ImageOps.swift:292-303`
+- **Deferred: Only the first frame is used** for animated GIF/WebP/HEICS (documented). Resizing or converting an animated GIF quietly turns it into a still.
+  *Why deferred:* a project of its own. Every action would need a per-frame path (with timing), and animated WebP output needs libwebp's animation encoder.
 
 ### Build & distribution
-- **arm64 only, macOS 26+ only**, purely because of Homebrew's libwebp. Building libwebp from source (or vendoring it) with `-mmacosx-version-min=13` and `-arch x86_64 -arch arm64` would widen support a lot. `build.sh:17`
-- **The app is ad-hoc signed and rebuilt each time,** so its code identity changes. Notification permission and Launch at Login may need re-approving after each rebuild, and Gatekeeper blocks it on other Macs. A Developer ID plus notarisation is needed to share it.
-- **No tests.** `ImageOps`, `CropGeometry`, `reserveURL`, and `WheelModel.index(at:)` are pure and easy to unit-test. The `--run` CLI could drive a small golden-image test script.
+- **Deferred: arm64 only, macOS 26+ only**, purely because of Homebrew's libwebp. Building libwebp from source (or vendoring it) with `-mmacosx-version-min=13` and `-arch x86_64 -arch arm64` would widen support a lot. `build.sh:17`
+- **Deferred: The app is ad-hoc signed and rebuilt each time,** so its code identity changes. Notification permission and Launch at Login may need re-approving after each rebuild, and Gatekeeper blocks it on other Macs. A Developer ID plus notarisation is needed to share it.
+  *Why deferred (both items):* a distribution decision, not a bug. It only matters once Halo is shared beyond this Mac.
+- ✅ (golden CLI tests: `./Tests/run.sh`) **No tests.** `ImageOps`, `CropGeometry`, `reserveURL`, and `WheelModel.index(at:)` are pure and easy to unit-test. The `--run` CLI could drive a small golden-image test script.
 
 ---
 
 ## 3. Structure / cleanup
 
-### 3.1 Wheel visibility is spread across too much state (root cause of 1.2 and 1.3)
+### Deferred: 3.1 Wheel visibility is spread across too much state (root cause of 1.2 and 1.3)
 `Sources/Wheel.swift:85-127`, `Sources/main.swift:26-33`
 
 Whether the wheel is showing depends on `panel.isVisible`, `model.shown`, `model.status`, the `generation` counter, and delayed closures, all checked from `main.swift`, `perform`, `dragEnded`, and the hand-off timer. Replacing this with one explicit state enum (`hidden / appearing / idle / working / finishing / disappearing`) and a single `transition(to:)` would make races like 1.2 and 1.3 impossible, rather than patching each one.
 
+*Why deferred:* 1.2 and 1.3 were fixed with small, targeted changes instead, so a rewrite of `WheelController` isn't needed right now. Do it if another wheel visibility bug turns up, or before adding more wheel states.
+
 ### ✅ 3.2 Orientation handling should be one rule, not a per-action flag
 Covered in 1.1: always bake the orientation in at load time, then delete the `oriented:` parameter and the special cases in `load`.
 
-### 3.3 Dead or duplicated code
+### ✅ 3.3 Dead or duplicated code
 - `WheelModel.fileCount` is set in `show()` but never read. `Sources/Wheel.swift:27`, `:102`
 - `perform()` runs `urls.filter(ImageOps.isImage)` in both branches, and `ImageOps.run` filters again. Filter once at the top. `Sources/Wheel.swift:136`, `:149`, `Sources/ImageOps.swift:70`
 - `Settings.setAll` writes `UserDefaults` once per item through `didSet`. Build the new set, then assign it once. `Sources/Settings.swift:31-33`
@@ -148,41 +162,33 @@ Covered in 1.1: always bake the orientation in at load time, then delete the `or
 
 ## 4. Ideas to make Halo better
 
+Unmarked ideas are open. **Deferred** product features (presets, batch rename, Finder/Services extension, OCR, background removal) need their own design pass before planning; each one changes the wheel or Settings in ways worth deciding up front.
+
 **Workflow**
-- **Output location setting:** next to the original (default), a fixed folder, or "ask". Add an option to replace the original, with the original moved to the Trash so it's recoverable.
-- **Undo for the last job:** move its outputs to the Trash, from the menu or a notification action.
-- **Presets:** let users add their own wheel slices (for example "WebP q70 max 2048px" or "JPG 1080px stripped"), one action combining resize, format, quality, and strip.
-- **Batch rename** on save: patterns such as `{name}-{w}x{h}`, `{name}@2x`.
+- ✅ (partly) **Output location setting:** next to the original (default), a fixed folder, or "ask". Add an option to replace the original, with the original moved to the Trash so it's recoverable.
+  *Done:* next to the original, or a chosen folder, with a Downloads fallback when the folder isn't writable. *Open:* "ask", and replacing the original.
+- ✅ **Undo for the last job:** move its outputs to the Trash, from the menu or a notification action. *Done as* a "Trash" button on finished jobs in the menu, plus "Move to Trash" on the notification.
+- **Deferred:** **Presets:** let users add their own wheel slices (for example "WebP q70 max 2048px" or "JPG 1080px stripped"), one action combining resize, format, quality, and strip.
+- **Deferred:** **Batch rename** on save: patterns such as `{name}-{w}x{h}`, `{name}@2x`.
 - **Copy the result to the clipboard** as an extra wheel slot or a modifier on drop. This is handy for pasting into chat apps.
-- **Drop-to-Halo without a drag modifier:** a menu bar drop target, a Services menu entry, or Finder Quick Actions (a Share/Action extension), so it also works from the keyboard and for people who don't like modifier taps.
+- **Deferred:** **Drop-to-Halo without a drag modifier:** a menu bar drop target, a Services menu entry, or Finder Quick Actions (a Share/Action extension), so it also works from the keyboard and for people who don't like modifier taps.
 
 **Formats & tools**
-- Lossless WebP/AVIF options, and a quality slider in Settings.
+- ✅ (partly) Lossless WebP/AVIF options, and a quality slider in Settings. *Done:* WebP is lossless automatically from lossless sources. *Open:* AVIF lossless, and a quality slider.
 - Rotate/flip slices (90°, 180°, mirror).
 - Animated GIF ↔ animated WebP/APNG, and MOV → GIF.
-- Multi-page TIFF/PDF → images (the reverse of "Make PDF"), plus page-size and margin choices for Make PDF.
-- Show the size saving on Compress ("2.4 MB → 610 KB, -75%").
-- Background removal (Vision `VNGenerateForegroundInstanceMaskRequest`) as a tool slice.
-- OCR/"copy text from image" (Vision) as a tool slice.
+- Multi-page TIFF/PDF → images (the reverse of "Make PDF"), plus page-size and margin choices for Make PDF. (Make PDF now uses A4/Letter with fixed margins.)
+- ✅ Show the size saving on Compress ("2.4 MB → 610 KB, -75%"): on the wheel, the menu row and the notification.
+- **Deferred:** Background removal (Vision `VNGenerateForegroundInstanceMaskRequest`) as a tool slice.
+- **Deferred:** OCR/"copy text from image" (Vision) as a tool slice.
 
 **UX**
-- A small preview in the wheel's centre showing the dragged file count and type, which would also make `fileCount` useful.
-- Remember the last aspect ratio in the crop window, and offer a typed pixel size ("1200 × 630").
+- A small preview in the wheel's centre showing the dragged file count and type. (`fileCount` was removed as dead code in 3.3; add a count back if this is built.)
+- ✅ (partly) Remember the last aspect ratio in the crop window, and offer a typed pixel size ("1200 × 630"). *Done:* the aspect is remembered. A crop that comes only from the remembered aspect doesn't trigger the "Discard your crops?" prompt. *Open:* typed pixel size.
 - Keyboard nudging (arrow keys move the crop by 1 px, ⇧ by 10 px). Arrows currently switch images; ⌘/⌥-arrow could do that instead.
 - A first-launch onboarding window showing the gesture. The menu's help line is the only hint today.
 - Accessibility: VoiceOver labels on wheel slices, and Reduce Motion support for the spring animation.
 
 **Engineering**
-- Move to an Xcode project or a SwiftPM executable with a test target, add CI that builds and runs the `--run` golden tests, and adopt Swift 6 strict concurrency (`ImageOps` is called from `OperationQueue` threads; it's currently safe, but nothing enforces that).
-- Universal build with a vendored libwebp, Developer ID signing, notarisation, and Sparkle for updates.
-
----
-
-## 5. Priority order (suggested)
-
-1. 1.1 orientation on convert, a visible wrong-output bug.
-2. 1.2 / 1.3 / 3.1 wheel visibility races, ideally fixed with the state-machine refactor.
-3. 1.4 shared crop breaks aspect ratio.
-4. 1.5 notification reveal, 1.6 1×1 decode, 1.7 no-op fit copies, 1.8 compress growth/alpha.
-5. The DragWatcher idle polling and the crop window's full-resolution decode (performance).
-6. Lossless WebP, colour-profile handling, output-folder setting.
+- Move to an Xcode project or a SwiftPM executable with a test target, add CI that runs `./Tests/run.sh`, and adopt Swift 6 strict concurrency (`ImageOps` is called from `OperationQueue` threads; it's currently safe, but nothing enforces that).
+- **Deferred:** Universal build with a vendored libwebp, Developer ID signing, notarisation, and Sparkle for updates (see Build & distribution).

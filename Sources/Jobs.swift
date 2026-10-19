@@ -23,6 +23,11 @@ final class Job: ObservableObject, Identifiable {
     @Published fileprivate(set) var completed = 0
     @Published fileprivate(set) var outputs: [URL] = []
     @Published fileprivate(set) var failures: [(name: String, reason: String)] = []
+    /// Sizes of the inputs and outputs of files Compress has finished, for showing the saving.
+    @Published fileprivate(set) var bytesIn = 0
+    @Published fileprivate(set) var bytesOut = 0
+    /// The outputs were moved to the Trash from the menu.
+    @Published private(set) var trashed = false
 
     /// Set once the wheel has handed the job to the menu bar; only those jobs notify.
     var handedOff = false
@@ -64,6 +69,31 @@ final class Job: ObservableObject, Identifiable {
     }
 
     func revealOutputs() { Self.reveal(outputs) }
+
+    func trashOutputs() {
+        Self.trash(outputs)
+        trashed = true
+    }
+
+    /// Moves whichever of these files still exist to the Trash. Never deletes anything outright.
+    static func trash(_ urls: [URL]) {
+        for url in urls where FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        }
+    }
+
+    /// Size change from Compress, e.g. -75, once it has finished at least one file.
+    var savingPercent: Int? {
+        guard bytesIn > 0 else { return nil }
+        return Int((Double(bytesOut - bytesIn) / Double(bytesIn) * 100).rounded())
+    }
+
+    /// "2.4 MB → 610 KB (-75%)".
+    var savingText: String? {
+        guard let percent = savingPercent else { return nil }
+        let f = ByteCountFormatter()
+        return "\(f.string(fromByteCount: Int64(bytesIn))) → \(f.string(fromByteCount: Int64(bytesOut))) (\(percent)%)"
+    }
 
     /// Selects whichever of these files still exist in Finder.
     static func reveal(_ urls: [URL]) {
@@ -132,10 +162,15 @@ final class JobCenter: ObservableObject {
         job.operations.qualityOfService = .userInitiated
         let folder = job.outputFolder
         for unit in job.units {
-            job.operations.addOperation {
-                let result = Result { try ImageOps.run(unit.action, on: unit.urls, outputFolder: folder) }
+            let operation = BlockOperation()
+            operation.addExecutionBlock { [weak operation] in
+                let result = Result {
+                    try ImageOps.run(unit.action, on: unit.urls, outputFolder: folder,
+                                     isCancelled: { operation?.isCancelled ?? true })
+                }
                 DispatchQueue.main.async { self.record(result, for: unit, in: job) }
             }
+            job.operations.addOperation(operation)
         }
         // Runs after every operation has finished or been cancelled.
         job.operations.addBarrierBlock {
@@ -143,10 +178,18 @@ final class JobCenter: ObservableObject {
         }
     }
 
-    private func record(_ result: Result<[URL], Error>, for unit: Job.Unit, in job: Job) {
+    private func record(_ result: Result<ImageOps.Outcome, Error>, for unit: Job.Unit, in job: Job) {
+        // Stopped by Cancel: neither done nor failed.
+        if case .failure(let error) = result, error as? ImageOpsError == .cancelled { return }
         job.completed += 1
         switch result {
-        case .success(let urls): job.outputs += urls
+        case .success(let outcome):
+            job.outputs += outcome.outputs
+            job.failures += outcome.failures
+            if unit.action == .compress, let input = unit.urls.first, let output = outcome.outputs.first {
+                job.bytesIn += ImageOps.fileSize(input)
+                job.bytesOut += ImageOps.fileSize(output)
+            }
         case .failure(let error):
             job.failures.append((unit.urls.count == 1 ? unit.urls[0].lastPathComponent : "PDF", error.localizedDescription))
         }
@@ -155,7 +198,8 @@ final class JobCenter: ObservableObject {
 
     fileprivate func finish(_ job: Job) {
         guard job.isActive else { return }
-        job.state = job.cancelRequested ? .cancelled : .finished
+        // A Cancel that came after the last file finished doesn't count.
+        job.state = job.cancelRequested && job.completed < job.total ? .cancelled : .finished
         if job.handedOff { Notifier.post(for: job) }
 
         let finished = jobs.filter { !$0.isActive }
@@ -177,6 +221,7 @@ final class JobCenter: ObservableObject {
 @MainActor
 enum Notifier {
     nonisolated static let revealAction = "reveal"
+    nonisolated static let trashAction = "trash"
     nonisolated static let category = "jobDone"
     /// userInfo key for the output paths, so "Show in Finder" works after the job is gone.
     nonisolated static let outputsKey = "outputs"
@@ -185,7 +230,8 @@ enum Notifier {
         let center = UNUserNotificationCenter.current()
         center.delegate = delegate
         let reveal = UNNotificationAction(identifier: revealAction, title: "Show in Finder")
-        center.setNotificationCategories([UNNotificationCategory(identifier: category, actions: [reveal],
+        let trash = UNNotificationAction(identifier: trashAction, title: "Move to Trash", options: [.destructive])
+        center.setNotificationCategories([UNNotificationCategory(identifier: category, actions: [reveal, trash],
                                                                  intentIdentifiers: [])])
     }
 
@@ -209,6 +255,7 @@ enum Notifier {
         let saved = job.outputs.count
         var parts = ["\(saved) \(saved == 1 ? "file" : "files") saved"]
         if !job.failures.isEmpty { parts.append("\(job.failures.count) failed") }
+        if let saving = job.savingText { parts.append(saving) }
         if job.state == .cancelled { parts.insert("Cancelled", at: 0) }
         return parts.joined(separator: " · ")
     }

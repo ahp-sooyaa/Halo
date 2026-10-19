@@ -44,9 +44,12 @@ struct JobRow: View {
                 if job.isActive {
                     Button("Cancel") { job.cancel() }
                         .controlSize(.small)
-                } else if !job.outputs.isEmpty {
+                } else if !job.outputs.isEmpty && !job.trashed {
                     Button("Show") { job.revealOutputs() }
                         .controlSize(.small)
+                    Button("Trash") { job.trashOutputs() }
+                        .controlSize(.small)
+                        .help("Move the results to the Trash")
                 }
             }
             if job.isActive {
@@ -81,7 +84,7 @@ struct JobRow: View {
         switch job.state {
         case .queued: return "Waiting · \(job.inputs.count) \(job.inputs.count == 1 ? "image" : "images")"
         case .running: return "\(job.completed) of \(job.total)" + failed
-        case .finished, .cancelled: return Notifier.summary(for: job)
+        case .finished, .cancelled: return job.trashed ? "Moved to Trash" : Notifier.summary(for: job)
         }
     }
 }
