@@ -2,7 +2,7 @@
 
 A tiny macOS menu bar app for converting images while you drag them.
 
-> **Inspiration:** Halo is a small personal project inspired by [Tangerine](https://www.macg.co/logiciels/2026/10/tangerine-un-convertisseur-de-fichiers-toujours-portee-de-main-sur-mac-311381), a Mac app that adds a conversion wheel to drag and drop. I liked the idea and built a minimal version for my own use. Halo is not affiliated with or endorsed by Tangerine or its developers, shares no code with it, and isn't meant to replace it. If you want a polished, supported app, use Tangerine.
+> **Inspiration:** Halo is a small personal project inspired by [Tangerine](https://tangerineformac.com/), a Mac app that adds a conversion wheel to drag and drop. I liked the idea and built a minimal version for my own use. Halo is not affiliated with or endorsed by Tangerine or its developers, shares no code with it, and isn't meant to replace it. If you want a polished, supported app, use Tangerine.
 
 1. Start dragging one or more images (Finder, Desktop…).
 2. Tap **⇧** for the **Convert** wheel (PNG, JPG, HEIC, WebP, AVIF, TIFF, GIF, BMP, PDF) or **⌘** for the **Tools** wheel (resize 75/50/25%, fit 1920px, compress, strip metadata, trim borders, crop…). **Crop…** opens a small window: drag to draw or move the selection, pick an aspect ratio, press Return to save.
