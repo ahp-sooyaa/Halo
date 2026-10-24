@@ -23,11 +23,11 @@ No Accessibility or Input Monitoring permission is needed: mouse buttons, modifi
 Needs Xcode and libwebp (`brew install webp`). libwebp is linked statically, so the built app doesn't need Homebrew to run.
 
 ```sh
-./build.sh        # produces Halo.app (ad-hoc signed, arm64, macOS 26+)
-open Halo.app
+./build.sh             # produces Halo.app (ad-hoc signed, arm64, macOS 26+)
+./build.sh --install   # also quits Halo, replaces /Applications/Halo.app and relaunches it
 ```
 
-Copy `Halo.app` to `/Applications` before turning on **Launch at Login**.
+Install to `/Applications` before turning on **Launch at Login**.
 
 ## Headless testing
 

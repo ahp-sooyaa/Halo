@@ -1,11 +1,25 @@
 #!/bin/zsh
-# Builds Halo.app next to this script. Usage: ./build.sh
+# Builds Halo.app next to this script. Usage: ./build.sh [--install]
+# --install also quits the running Halo, replaces /Applications/Halo.app and relaunches it.
 set -euo pipefail
 cd "$(dirname "$0")"
 
+INSTALL=false
+[[ "${1:-}" == "--install" ]] && INSTALL=true
+
 APP=Halo.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+# App icon: scale the 1024px master into an iconset and pack it as .icns.
+ICONSET="$(mktemp -d)/AppIcon.iconset"
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+  sips -z $size $size Assets/AppIcon-1024.png --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  sips -z $((size * 2)) $((size * 2)) Assets/AppIcon-1024.png --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+rm -rf "$(dirname "$ICONSET")"
 
 # libwebp (brew install webp) is linked statically so the app runs without Homebrew.
 WEBP="${WEBP_PREFIX:-$(brew --prefix webp 2>/dev/null || echo /opt/homebrew/opt/webp)}"
@@ -28,6 +42,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>Halo</string>
   <key>CFBundleIdentifier</key><string>local.halo.imageconverter</string>
   <key>CFBundleExecutable</key><string>Halo</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>
@@ -40,3 +55,17 @@ PLIST
 
 codesign --force --sign - "$APP"
 echo "Built $(pwd)/$APP"
+
+if $INSTALL; then
+  DEST=/Applications/Halo.app
+  if pgrep -xq Halo; then
+    osascript -e 'quit app id "local.halo.imageconverter"' 2>/dev/null || true
+    # Give it a few seconds to quit cleanly before forcing it.
+    for _ in {1..20}; do pgrep -xq Halo || break; sleep 0.25; done
+    pkill -x Halo 2>/dev/null || true
+  fi
+  rm -rf "$DEST"
+  ditto "$APP" "$DEST"
+  open "$DEST"
+  echo "Installed and launched $DEST"
+fi
