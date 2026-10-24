@@ -14,6 +14,42 @@ enum ImageAction: Equatable {
     case cropInteractive // opens the crop window; handled by WheelController
 }
 
+/// What goes between a file's name and the action word ("photo-cropped"), and before the number
+/// that keeps names unique ("photo-cropped-2").
+enum NameSeparator: String, CaseIterable, Identifiable {
+    case matchOriginal, space, dash, underscore
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .matchOriginal: return "Match the original"
+        case .space: return "Space"
+        case .dash: return "Dash"
+        case .underscore: return "Underscore"
+        }
+    }
+
+    /// The separator to use for a file named `stem` (no extension).
+    func string(for stem: String) -> String {
+        switch self {
+        case .space: return " "
+        case .dash: return "-"
+        case .underscore: return "_"
+        case .matchOriginal: return Self.detect(in: stem)
+        }
+    }
+
+    /// Any space wins, since names like "Screenshot 2026-10-24 at 10.00.00" have dashes only
+    /// inside the date. Otherwise whichever of _ and - is more common; dash when neither is
+    /// ("photo", "IMG1234", "myPhoto") or they tie.
+    static func detect(in stem: String) -> String {
+        if stem.contains(" ") { return " " }
+        let underscores = stem.filter { $0 == "_" }.count, dashes = stem.filter { $0 == "-" }.count
+        return underscores > dashes ? "_" : "-"
+    }
+}
+
 enum ImageOpsError: LocalizedError, Equatable {
     case unreadable(String)
     case writeFailed(String)
@@ -87,26 +123,30 @@ enum ImageOps {
     /// `outputFolder` nil saves next to each original. `isCancelled` is checked between files
     /// (and between PDF pages); a cancelled run throws `.cancelled`.
     static func run(_ action: ImageAction, on urls: [URL], outputFolder: URL? = nil,
+                    separator: NameSeparator = .matchOriginal,
                     isCancelled: () -> Bool = { false }) throws -> Outcome {
         let images = urls.filter(isImage)
         guard !images.isEmpty else { throw ImageOpsError.noImages }
-        if action == .pdf { return try makePDF(images, outputFolder: outputFolder, isCancelled: isCancelled) }
+        if action == .pdf {
+            return try makePDF(images, outputFolder: outputFolder, separator: separator, isCancelled: isCancelled)
+        }
         var outcome = Outcome()
         for url in images {
             if isCancelled() { throw ImageOpsError.cancelled }
-            do { outcome.outputs.append(try run(action, on: url, outputFolder: outputFolder)) }
+            do { outcome.outputs.append(try run(action, on: url, outputFolder: outputFolder, separator: separator)) }
             catch { outcome.failures.append((url.lastPathComponent, error.localizedDescription)) }
         }
         return outcome
     }
 
-    static func run(_ action: ImageAction, on url: URL, outputFolder: URL? = nil) throws -> URL {
+    static func run(_ action: ImageAction, on url: URL, outputFolder: URL? = nil,
+                    separator: NameSeparator = .matchOriginal) throws -> URL {
         let sourceType = type(of: url) ?? .png
         let sameType = sameType(for: sourceType)
         func save(_ image: CGImage, props: [CFString: Any], as type: UTType,
                   quality: Double? = nil, suffix: String? = nil) throws -> URL {
             try ImageOps.save(image, props: props, from: url, as: type, quality: quality, suffix: suffix,
-                              outputFolder: outputFolder)
+                              outputFolder: outputFolder, separator: separator)
         }
 
         switch action {
@@ -160,7 +200,7 @@ enum ImageOps {
             return try save(cropped, props: props, as: sameType, suffix: "cropped")
 
         case .pdf:
-            return try makePDF([url], outputFolder: outputFolder, isCancelled: { false }).outputs[0]
+            return try makePDF([url], outputFolder: outputFolder, separator: separator, isCancelled: { false }).outputs[0]
 
         case .cropInteractive:
             throw ImageOpsError.unsupported
@@ -286,11 +326,14 @@ enum ImageOps {
     }
 
     private static func save(_ image: CGImage, props: [CFString: Any], from source: URL, as type: UTType,
-                             quality: Double?, suffix: String?, outputFolder: URL?) throws -> URL {
+                             quality: Double?, suffix: String?, outputFolder: URL?,
+                             separator: NameSeparator) throws -> URL {
         let base = source.deletingPathExtension().lastPathComponent
-        let name = suffix.map { "\(base) \($0)" } ?? base
+        let sep = separator.string(for: base)
+        let name = suffix.map { "\(base)\(sep)\($0)" } ?? base
         let ext = type == .jpeg ? "jpg" : (type.preferredFilenameExtension ?? "img")
-        return try place(in: outputDir(for: source, preferred: outputFolder), name: name, ext: ext) { temp in
+        return try place(in: outputDir(for: source, preferred: outputFolder), name: name, ext: ext,
+                         separator: sep) { temp in
             try write(image, props: props, as: type, from: ImageOps.type(of: source), quality: quality, to: temp)
         }
     }
@@ -350,11 +393,13 @@ enum ImageOps {
     /// image, never enlarged past 1 px = 1 pt. Images are drawn as stored with the EXIF rotation
     /// applied as a transform, so JPEGs are embedded as-is instead of re-encoded (about 3× smaller).
     /// Unreadable images are skipped and reported; it throws only when no page could be made.
-    private static func makePDF(_ urls: [URL], outputFolder: URL?, isCancelled: () -> Bool) throws -> Outcome {
+    private static func makePDF(_ urls: [URL], outputFolder: URL?, separator: NameSeparator,
+                                isCancelled: () -> Bool) throws -> Outcome {
         var outcome = Outcome()
         let first = urls[0]
-        let out = try place(in: outputDir(for: first, preferred: outputFolder),
-                            name: first.deletingPathExtension().lastPathComponent, ext: "pdf") { temp in
+        let name = first.deletingPathExtension().lastPathComponent
+        let out = try place(in: outputDir(for: first, preferred: outputFolder), name: name, ext: "pdf",
+                            separator: separator.string(for: name)) { temp in
             guard let ctx = CGContext(temp as CFURL, mediaBox: nil, [kCGPDFContextCreator: "Halo"] as CFDictionary) else {
                 throw ImageOpsError.writeFailed(temp.lastPathComponent)
             }
@@ -425,10 +470,11 @@ enum ImageOps {
     // MARK: - Placing output files
 
     /// Writes the file with `body` to a temporary location on the same volume, then links it in
-    /// as "photo.png", "photo 2.png", "photo 3.png"… `link` fails instead of replacing an existing
+    /// as "photo.png", "photo 2.png", "photo 3.png"… (joined with `separator`). `link` fails instead of replacing an existing
     /// name, so parallel jobs can't collide and nothing is overwritten, and a crash mid-write
     /// leaves nothing in `dir` (the system cleans its temporary folders).
-    static func place(in dir: URL, name: String, ext: String, write body: (URL) throws -> Void) throws -> URL {
+    static func place(in dir: URL, name: String, ext: String, separator: String,
+                      write body: (URL) throws -> Void) throws -> URL {
         let fm = FileManager.default
         let scratch = try? fm.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: dir, create: true)
         let temp = scratch?.appendingPathComponent("out.\(ext)")
@@ -436,11 +482,11 @@ enum ImageOps {
         defer { try? fm.removeItem(at: scratch ?? temp) }
         try body(temp)
         for n in 1...10_000 {
-            let candidate = dir.appendingPathComponent(n == 1 ? name : "\(name) \(n)").appendingPathExtension(ext)
+            let candidate = dir.appendingPathComponent(n == 1 ? name : "\(name)\(separator)\(n)").appendingPathExtension(ext)
             if link(temp.path, candidate.path) == 0 { return candidate }
             if errno == EEXIST { continue }
             // No hard links on this volume (e.g. exFAT): claim the name, then move the file over it.
-            let out = try reserveURL(in: dir, name: name, ext: ext)
+            let out = try reserveURL(in: dir, name: name, ext: ext, separator: separator)
             do {
                 _ = try fm.replaceItemAt(out, withItemAt: temp)
                 return out
@@ -452,11 +498,11 @@ enum ImageOps {
         throw ImageOpsError.writeFailed("\(name).\(ext)")
     }
 
-    /// Claims "photo.png", then "photo 2.png", "photo 3.png"… by creating an empty file with
+    /// Claims "photo.png", then "photo 2.png", "photo 3.png"… (joined with `separator`) by creating an empty file with
     /// O_EXCL, so files converted in parallel can't pick the same name. Never overwrites anything.
-    private static func reserveURL(in dir: URL, name: String, ext: String) throws -> URL {
+    private static func reserveURL(in dir: URL, name: String, ext: String, separator: String) throws -> URL {
         for n in 1...10_000 {
-            let candidate = dir.appendingPathComponent(n == 1 ? name : "\(name) \(n)").appendingPathExtension(ext)
+            let candidate = dir.appendingPathComponent(n == 1 ? name : "\(name)\(separator)\(n)").appendingPathExtension(ext)
             let fd = open(candidate.path, O_CREAT | O_EXCL | O_WRONLY, 0o644)
             if fd >= 0 {
                 close(fd)

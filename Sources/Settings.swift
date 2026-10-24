@@ -1,13 +1,14 @@
 import AppKit
 import SwiftUI
 
-/// Which wheel items are turned on, and where results are saved. Wheel items are stored as the
+/// Which wheel items are turned on, and where and how results are saved. Wheel items are stored as the
 /// set of turned-off keys, so items added in future versions appear enabled by default.
 @MainActor
 final class Settings: ObservableObject {
     static let shared = Settings()
     private static let defaultsKey = "disabledWheelItems"
     private static let outputFolderKey = "outputFolder"
+    private static let separatorKey = "nameSeparator"
 
     @Published private var disabled: Set<String> {
         didSet { UserDefaults.standard.set(Array(disabled).sorted(), forKey: Self.defaultsKey) }
@@ -18,9 +19,14 @@ final class Settings: ObservableObject {
         didSet { UserDefaults.standard.set(outputFolder?.path, forKey: Self.outputFolderKey) }
     }
 
+    @Published var separator: NameSeparator {
+        didSet { UserDefaults.standard.set(separator.rawValue, forKey: Self.separatorKey) }
+    }
+
     private init() {
         disabled = Set(UserDefaults.standard.stringArray(forKey: Self.defaultsKey) ?? [])
         outputFolder = UserDefaults.standard.string(forKey: Self.outputFolderKey).map { URL(fileURLWithPath: $0) }
+        separator = UserDefaults.standard.string(forKey: Self.separatorKey).flatMap(NameSeparator.init) ?? .matchOriginal
     }
 
     /// Asks for a folder to save results to. Cancelling keeps the current choice.
@@ -84,6 +90,7 @@ struct SettingsView: View {
             section("Convert", key: "⇧", mode: .convert)
             section("Tools", key: "⌘", mode: .tools)
             output
+            naming
             Text("Turned-off items are hidden from the wheel. If every item in a wheel is off, its key does nothing.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -120,6 +127,28 @@ struct SettingsView: View {
                 Text("If Halo can't write to the folder, results go to Downloads.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+        }
+    }
+
+    private var naming: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Result Names").font(.headline)
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Separator", selection: $settings.separator) {
+                    ForEach(NameSeparator.allCases) { Text($0.title).tag($0) }
+                }
+                .fixedSize()
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(["IMG_1234", "my-photo", "Screenshot 2026-10-24"], id: \.self) { stem in
+                        Text("\(stem).png → \(stem)\(settings.separator.string(for: stem))cropped.png")
+                    }
+                }
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -151,7 +151,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 }
 
-// `Halo --run <action> <files…>` runs one action headlessly (used for testing).
+// `Halo [--separator space|dash|underscore] --run <action> <files…>` runs one action headlessly
+// (used for testing). Names match the original's separator unless --separator says otherwise.
 let args = CommandLine.arguments
 if let i = args.firstIndex(of: "--run"), args.count > i + 2 {
     let name = args[i + 1].lowercased()
@@ -178,7 +179,8 @@ if let i = args.firstIndex(of: "--run"), args.count > i + 2 {
     }
     func printError(_ message: String) { FileHandle.standardError.write(Data("Error: \(message)\n".utf8)) }
     do {
-        let outcome = try ImageOps.run(action, on: files)
+        let separator = args.firstIndex(of: "--separator").flatMap { $0 + 1 < i ? NameSeparator(rawValue: args[$0 + 1]) : nil }
+        let outcome = try ImageOps.run(action, on: files, separator: separator ?? .matchOriginal)
         for out in outcome.outputs { print(out.path) }
         for failure in outcome.failures { printError("\(failure.name): \(failure.reason)") }
         exit(outcome.failures.isEmpty ? 0 : 1)

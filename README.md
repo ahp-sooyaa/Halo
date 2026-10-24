@@ -10,7 +10,7 @@ A tiny macOS menu bar app for converting images while you drag them.
 
 Quick jobs finish in the wheel. If a job takes longer than about 1.5 seconds, the wheel hands it to the menu bar: the icon turns into a progress ring, the menu lists each job with Cancel / Show, and a notification appears when it's done. Files in a job are processed a few at a time in parallel; a file that fails is reported without stopping the rest.
 
-Menu bar → **Settings…** turns individual formats and tools on or off, and picks where results are saved.
+Menu bar → **Settings…** turns individual formats and tools on or off, picks where results are saved, and how result names are joined (by default the same way as the original: `IMG_1234_cropped`, `my-photo-cropped`, `Screenshot … cropped`).
 
 WebP from a lossless source (PNG, TIFF, GIF, BMP) is encoded lossless and keeps the image's colour profile (e.g. Display P3). **Compress** turns images with transparency into WebP, skips files it can't make smaller, and shows the saving. **1920px** skips images that are already that small. Resizing keeps 16-bit depth and doesn't add an alpha channel. **PDF** fits each image onto an A4 page (Letter in the US and Canada), embeds JPEGs without re-encoding, and skips files it can't read.
 

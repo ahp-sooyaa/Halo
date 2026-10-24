@@ -51,7 +51,7 @@ expect "compress keeps transparency (pixels)" yes "$(check transparent "$out")"
 run compress lowq.jpg
 expect "compress skips files it can't shrink" 1 $code
 expect "compress says why" "*Already well compressed*" "$err"
-expect "compress leaves nothing behind" "" "$(ls | grep 'lowq compressed')"
+expect "compress leaves nothing behind" "" "$(ls | grep 'lowq.compressed')"
 run compress small.jpg
 expect "compress shrinks a high-quality JPEG" 0 $code
 
@@ -86,6 +86,30 @@ run pdf big72.jpg broken.png
 expect "PDF with a bad file reports it" 1 $code
 expect "PDF with a bad file names it" "*broken.png*" "$err"
 expect "PDF with a bad file still has the good page" "1 *" "$(check pdf "$out")"
+
+# Result names match the original's separator, and Settings can force one.
+cp small.jpg IMG_1234.jpg; cp small.jpg my-photo.jpg; cp small.jpg "Screenshot 2026-10-24 at 10.00.00.jpg"
+cp small.jpg plain.jpg; cp small.jpg a_b-c.jpg
+run strip IMG_1234.jpg
+expect "name keeps underscores" "*/IMG_1234_clean.jpg" "$out"
+run strip my-photo.jpg
+expect "name keeps dashes" "*/my-photo-clean.jpg" "$out"
+run strip "Screenshot 2026-10-24 at 10.00.00.jpg"
+expect "name keeps spaces over date dashes" "*/Screenshot 2026-10-24 at 10.00.00 clean.jpg" "$out"
+run strip plain.jpg
+expect "name without a separator uses a dash" "*/plain-clean.jpg" "$out"
+run strip a_b-c.jpg
+expect "tied separators use a dash" "*/a_b-c-clean.jpg" "$out"
+run strip IMG_1234.jpg
+expect "collision number uses the same separator" "*/IMG_1234_clean_2.jpg" "$out"
+run strip IMG_1234_clean.jpg
+expect "a second action chains with the same separator" "*/IMG_1234_clean_clean.jpg" "$out"
+run pdf my-photo.jpg; run pdf my-photo.jpg
+expect "PDF collision uses the same separator" "*/my-photo-2.pdf" "$out"
+out=$("$HALO" --separator space --run strip my-photo.jpg 2>/dev/null)
+expect "--separator space overrides" "*/my-photo clean.jpg" "$out"
+out=$("$HALO" --separator underscore --run strip "Screenshot 2026-10-24 at 10.00.00.jpg" 2>/dev/null)
+expect "--separator underscore overrides" "*/Screenshot 2026-10-24 at 10.00.00_clean.jpg" "$out"
 
 # A crash mid-write leaves no empty file in the source folder.
 "$HALO" --run png huge.tiff >/dev/null 2>&1 &

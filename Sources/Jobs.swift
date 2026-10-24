@@ -18,6 +18,8 @@ final class Job: ObservableObject, Identifiable {
     var inputs: [URL] { units.flatMap(\.urls) }
     /// Where results go, from Settings when the job was made; nil means next to each original.
     let outputFolder: URL?
+    /// How result names are joined, from Settings when the job was made.
+    let separator: NameSeparator
 
     @Published fileprivate(set) var state: State = .queued
     @Published fileprivate(set) var completed = 0
@@ -45,6 +47,7 @@ final class Job: ObservableObject, Identifiable {
         self.title = title
         self.units = units
         self.outputFolder = Settings.shared.outputFolder
+        self.separator = Settings.shared.separator
     }
 
     /// The same action on every file.
@@ -160,12 +163,12 @@ final class JobCenter: ObservableObject {
         // A few at a time: full-size photos decode to hundreds of MB each.
         job.operations.maxConcurrentOperationCount = max(2, min(4, ProcessInfo.processInfo.activeProcessorCount / 2))
         job.operations.qualityOfService = .userInitiated
-        let folder = job.outputFolder
+        let folder = job.outputFolder, separator = job.separator
         for unit in job.units {
             let operation = BlockOperation()
             operation.addExecutionBlock { [weak operation] in
                 let result = Result {
-                    try ImageOps.run(unit.action, on: unit.urls, outputFolder: folder,
+                    try ImageOps.run(unit.action, on: unit.urls, outputFolder: folder, separator: separator,
                                      isCancelled: { operation?.isCancelled ?? true })
                 }
                 DispatchQueue.main.async { self.record(result, for: unit, in: job) }
