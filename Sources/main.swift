@@ -9,7 +9,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private let wheel = WheelController()
     private let watcher = DragWatcher()
     private let settingsWindow = SettingsWindowController()
-    private let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
     /// The menu while it's open, and the job rows it was built with, so it can be rebuilt when
     /// jobs are added, removed or finish (rows change height) while it's showing.
     private var openMenu: NSMenu?
@@ -22,7 +21,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let menu = NSMenu()
         menu.delegate = self // rebuilt each time it opens, see menuNeedsUpdate
         statusItem.menu = menu
-        loginItem.target = self
 
         Notifier.setUp(delegate: self)
         JobCenter.shared.onChange = { [weak self] in self?.jobsChanged() }
@@ -70,13 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if !jobs.isEmpty {
             menu.addItem(.separator())
             // Newest first.
-            for job in jobs.reversed() {
-                let host = NSHostingView(rootView: JobRow(job: job))
-                host.frame = CGRect(origin: .zero, size: CGSize(width: JobRow.width, height: host.fittingSize.height))
-                let item = NSMenuItem()
-                item.view = host
-                menu.addItem(item)
-            }
+            for job in jobs.reversed() { menu.addItem(Self.rowItem(JobRow(job: job))) }
             if jobs.contains(where: { !$0.isActive }) {
                 let clear = NSMenuItem(title: "Clear Finished", action: #selector(clearFinished), keyEquivalent: "")
                 clear.target = self
@@ -87,11 +79,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         menu.addItem(.separator())
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
+        if #available(macOS 27, *) { settingsItem.preferredImageVisibility = .hidden } // no automatic gear
         menu.addItem(settingsItem)
-        refreshLoginItem()
-        menu.addItem(loginItem)
+        // A switch row rather than a checkmark: a checked standard item makes the menu add a state
+        // column that shifts the standard items right but not the job rows.
+        menu.addItem(Self.rowItem(LoginRow { [weak self] in self?.setLaunchAtLogin($0) ?? false }))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Halo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    /// A menu item showing a SwiftUI row, stretched to the menu's width so trailing buttons sit at
+    /// the right edge.
+    private static func rowItem(_ row: some View) -> NSMenuItem {
+        let host = NSHostingView(rootView: row)
+        // Measure before dropping the sizing options: without them fittingSize is zero.
+        let height = host.fittingSize.height
+        host.sizingOptions = [] // or its maximum-size constraint stops the menu widening it
+        host.frame = CGRect(origin: .zero, size: CGSize(width: MenuRow.minWidth, height: height))
+        host.autoresizingMask = .width
+        let item = NSMenuItem()
+        item.view = host
+        return item
     }
 
     private func refreshIcon() {
@@ -130,24 +138,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         settingsWindow.show()
     }
 
-    private func refreshLoginItem() {
-        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
-    }
-
-    @objc private func toggleLogin() {
+    /// Returns whether Halo launches at login afterwards.
+    private func setLaunchAtLogin(_ on: Bool) -> Bool {
         do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
         } catch {
+            openMenu?.cancelTracking() // the alert can't take clicks while the menu is open
             let alert = NSAlert()
             alert.messageText = "Couldn't change login item"
             alert.informativeText = "\(error.localizedDescription)\n\nTry moving Halo to /Applications first."
             alert.runModal()
         }
-        refreshLoginItem()
+        return SMAppService.mainApp.status == .enabled
     }
 }
 

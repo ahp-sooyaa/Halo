@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 
 enum MenuBarIcon {
@@ -28,9 +29,58 @@ enum MenuBarIcon {
     }
 }
 
+/// Layout shared by the custom menu rows.
+enum MenuRow {
+    static let minWidth: CGFloat = 300
+    /// Lines the rows' text up with the standard items' titles.
+    static let inset: CGFloat = 16
+}
+
+/// "Launch at Login" with a switch. Clicking the label flips it too.
+struct LoginRow: View {
+    /// Tries to turn launching at login on or off; returns whether it's on afterwards.
+    let set: (Bool) -> Bool
+    @State private var isOn = SMAppService.mainApp.status == .enabled
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack {
+                Text("Launch at Login").font(.system(size: 13))
+                Spacer(minLength: 4)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { isOn = set(!isOn) }
+            Toggle("Launch at Login", isOn: Binding(get: { isOn }, set: { isOn = set($0) }))
+                .toggleStyle(MenuSwitchStyle())
+                .labelsHidden()
+        }
+        .padding(.horizontal, MenuRow.inset)
+        .padding(.vertical, 4)
+        .frame(minWidth: MenuRow.minWidth, maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A switch that shows the accent colour when on. The system switch draws grey in a menu, which is
+/// never the key window, and overriding `controlActiveState` doesn't change that.
+struct MenuSwitchStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Capsule()
+            .fill(configuration.isOn ? Color.accentColor : Color.primary.opacity(0.15))
+            .overlay(alignment: configuration.isOn ? .trailing : .leading) {
+                Circle()
+                    .fill(.white)
+                    .shadow(color: .black.opacity(0.25), radius: 0.5, y: 0.5)
+                    .padding(1.5)
+            }
+            .frame(width: 26, height: 15)
+            .animation(.easeOut(duration: 0.15), value: configuration.isOn)
+            .contentShape(Capsule())
+            .onTapGesture { configuration.isOn.toggle() }
+    }
+}
+
 /// One job in the menu bar menu; updates live while the menu is open.
 struct JobRow: View {
-    static let width: CGFloat = 300
     @ObservedObject var job: Job
 
     var body: some View {
@@ -62,9 +112,9 @@ struct JobRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, MenuRow.inset)
         .padding(.vertical, 6)
-        .frame(width: Self.width, alignment: .leading)
+        .frame(minWidth: MenuRow.minWidth, maxWidth: .infinity, alignment: .leading)
         .help(job.failures.map { "\($0.name): \($0.reason)" }.joined(separator: "\n"))
     }
 
