@@ -65,3 +65,7 @@ Actions: any format name, `pdf`, `scaleNN` (1–99), `fit`, `compress`, `strip`,
 - WebP output doesn't carry EXIF metadata and is limited to 16383px per side.
 - macOS 26+ only, because Homebrew's libwebp is built for macOS 26.
 - Only the first frame of animated GIFs / multi-page images is used.
+
+## License
+
+[MIT](LICENSE). libwebp is distributed under its own BSD-style license.
